@@ -32,3 +32,21 @@ spots:
     lat: 44.5006
     lon: -72.7183
     activities: [skiing]
+
+  - id: mendon-ponds-park 
+    name: Mendon Ponds Park
+    lat: 42.998952
+    lon: -77.5638868
+    activities: [hiking]
+
+  - id: harriet-hollister-park
+    name: Harriet Hollister Park
+    lat: 42.689
+    lon: -77.512
+    activities: [hiking,skiing]
+
+  - id: boughton-park
+    name: Boughton. Park
+    lat: 42.93471
+    lon: -77.43973
+    activities: [hiking]
