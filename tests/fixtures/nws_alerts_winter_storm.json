@@ -1,0 +1,13 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "properties": {
+        "event": "Winter Storm Warning",
+        "severity": "Severe",
+        "headline": "Winter Storm Warning issued January 15 until January 16 at 7:00AM EST",
+        "ends": "2026-01-16T07:00:00-05:00"
+      }
+    }
+  ]
+}

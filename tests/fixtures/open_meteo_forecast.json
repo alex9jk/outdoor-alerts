@@ -1,0 +1,20 @@
+{
+  "latitude": 42.745,
+  "longitude": -77.404,
+  "timezone": "America/New_York",
+  "hourly": {
+    "time": ["2026-01-15T00:00", "2026-01-15T01:00"],
+    "temperature_2m": [24.1, 23.5],
+    "precipitation_probability": [10, 20],
+    "precipitation": [0.0, 0.01],
+    "wind_speed_10m": [6.2, 7.0],
+    "wind_gusts_10m": [12.4, 14.1],
+    "snowfall": [0.0, 0.1],
+    "weather_code": [3, 71]
+  },
+  "daily": {
+    "time": ["2026-01-15", "2026-01-16"],
+    "sunrise": ["2026-01-15T07:30", "2026-01-16T07:29"],
+    "sunset": ["2026-01-15T16:55", "2026-01-16T16:56"]
+  }
+}

@@ -1,0 +1,184 @@
+import json
+import logging
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+import respx
+
+from gooddays.fetch import http
+from gooddays.fetch.http import MAX_ATTEMPTS, FetchError
+from gooddays.fetch.nws import ALERTS_URL, fetch_alerts
+from gooddays.fetch.open_meteo import FORECAST_URL, fetch_forecast
+from gooddays.models import Settings, Spot
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+SPOT = Spot(
+    id="bristol", name="Bristol", lat=42.745, lon=-77.404, activities=("skiing",)
+)
+SETTINGS = Settings(
+    nws_user_agent="gooddays-test (t@example.com)", timezone="America/New_York"
+)
+
+
+def fixture(name: str) -> dict[str, Any]:
+    data: dict[str, Any] = json.loads((FIXTURES / name).read_text())
+    return data
+
+
+@pytest.fixture(autouse=True)
+def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    monkeypatch.setattr(http, "_sleep", fake_sleep)
+    return delays
+
+
+@pytest.fixture
+async def client() -> AsyncIterator[httpx.AsyncClient]:
+    async with httpx.AsyncClient() as c:
+        yield c
+
+
+# --- Open-Meteo ---
+
+
+@respx.mock
+async def test_forecast_sends_expected_params(client: httpx.AsyncClient) -> None:
+    route = respx.get(FORECAST_URL).respond(json=fixture("open_meteo_forecast.json"))
+
+    result = await fetch_forecast(client, SPOT, SETTINGS)
+
+    assert result == fixture("open_meteo_forecast.json")
+    params = route.calls.last.request.url.params
+    assert params["latitude"] == "42.745"
+    assert params["longitude"] == "-77.404"
+    assert params["hourly"] == (
+        "temperature_2m,precipitation_probability,precipitation,"
+        "wind_speed_10m,wind_gusts_10m,snowfall,weather_code"
+    )
+    assert params["daily"] == "sunrise,sunset"
+    assert params["forecast_days"] == "2"
+    assert params["temperature_unit"] == "fahrenheit"
+    assert params["wind_speed_unit"] == "mph"
+    assert params["precipitation_unit"] == "inch"
+    assert params["timezone"] == "America/New_York"
+
+
+# --- NWS ---
+
+
+@respx.mock
+async def test_alerts_sends_point_and_headers(client: httpx.AsyncClient) -> None:
+    route = respx.get(ALERTS_URL).respond(json=fixture("nws_alerts_winter_storm.json"))
+
+    result = await fetch_alerts(client, SPOT, SETTINGS)
+
+    assert result == fixture("nws_alerts_winter_storm.json")
+    request = route.calls.last.request
+    assert request.url.params["point"] == "42.745,-77.404"
+    assert "point=42.745,-77.404" in str(request.url)  # comma not percent-encoded
+    assert request.headers["User-Agent"] == SETTINGS.nws_user_agent
+    assert request.headers["Accept"] == "application/geo+json"
+
+
+@respx.mock
+async def test_alerts_empty_feature_collection(client: httpx.AsyncClient) -> None:
+    respx.get(ALERTS_URL).respond(json=fixture("nws_alerts_none.json"))
+    assert (await fetch_alerts(client, SPOT, SETTINGS))["features"] == []
+
+
+# --- Retry policy (shared helper, exercised through a client) ---
+
+
+@respx.mock
+async def test_timeout_then_success_retries(
+    client: httpx.AsyncClient, no_sleep: list[float]
+) -> None:
+    route = respx.get(FORECAST_URL).mock(
+        side_effect=[httpx.ReadTimeout("slow"), httpx.Response(200, json={"ok": 1})]
+    )
+
+    assert await fetch_forecast(client, SPOT, SETTINGS) == {"ok": 1}
+    assert route.call_count == 2
+    assert no_sleep == [0.5]
+
+
+@respx.mock
+async def test_server_error_three_times_raises(
+    client: httpx.AsyncClient, no_sleep: list[float]
+) -> None:
+    route = respx.get(FORECAST_URL).respond(500)
+
+    with pytest.raises(FetchError) as exc:
+        await fetch_forecast(client, SPOT, SETTINGS)
+
+    assert exc.value.source == "open_meteo"
+    assert exc.value.status_code == 500
+    assert route.call_count == MAX_ATTEMPTS
+    assert no_sleep == [0.5, 1.0]  # exponential, no sleep after the last attempt
+
+
+@respx.mock
+async def test_timeouts_exhaust_retries(client: httpx.AsyncClient) -> None:
+    route = respx.get(ALERTS_URL).mock(side_effect=httpx.ConnectTimeout("slow"))
+
+    with pytest.raises(FetchError, match="timeout") as exc:
+        await fetch_alerts(client, SPOT, SETTINGS)
+
+    assert exc.value.status_code is None
+    assert exc.value.source == "nws"
+    assert route.call_count == MAX_ATTEMPTS
+
+
+@respx.mock
+async def test_client_error_is_not_retried(client: httpx.AsyncClient) -> None:
+    route = respx.get(ALERTS_URL).respond(404)
+
+    with pytest.raises(FetchError, match="HTTP 404") as exc:
+        await fetch_alerts(client, SPOT, SETTINGS)
+
+    assert exc.value.status_code == 404
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_connection_error_is_not_retried(client: httpx.AsyncClient) -> None:
+    route = respx.get(FORECAST_URL).mock(side_effect=httpx.ConnectError("refused"))
+
+    with pytest.raises(FetchError, match="request failed"):
+        await fetch_forecast(client, SPOT, SETTINGS)
+
+    assert route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [("not json", "not valid JSON"), ("[1, 2]", "not an object")],
+)
+async def test_bad_response_body(
+    client: httpx.AsyncClient, body: str, message: str
+) -> None:
+    respx.get(FORECAST_URL).respond(200, text=body)
+
+    with pytest.raises(FetchError, match=message):
+        await fetch_forecast(client, SPOT, SETTINGS)
+
+
+@respx.mock
+async def test_failures_are_logged(
+    client: httpx.AsyncClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    respx.get(ALERTS_URL).respond(404)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(FetchError):
+        await fetch_alerts(client, SPOT, SETTINGS)
+
+    assert "fetch_failed source=nws status=404 retry=no" in caplog.text
