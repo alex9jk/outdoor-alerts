@@ -1,26 +1,52 @@
 # Config for gooddays. No locations or settings are hard-coded in the code.
 
 settings:
-  # NWS requires a descriptive User-Agent with contact info.
-  nws_user_agent: "gooddays (ajkramer90@gmail.com)"
+  # NWS requires a descriptive User-Agent with contact info. Don't commit your
+  # email: set GOODDAYS_NWS_USER_AGENT in your shell instead, e.g.
+  #   export GOODDAYS_NWS_USER_AGENT="gooddays (you@example.com)"
+  # (A nws_user_agent value here is used only if the env var is unset.)
   # IANA timezone passed to Open-Meteo; hourly/daily times are local to it.
   timezone: America/New_York
 
 spots:
-  - id: bear-mountain       # unique, stable slug; used in logs and data/raw paths
-    name: Bear Mountain
-    lat: 41.3118
-    lon: -74.0083
-    activities: [hiking]    # any of: hiking, biking, skiing
+  - id: bristol-mountain     # unique, stable slug; used in logs and data/raw paths
+    name: Bristol Mountain
+    lat: 42.745
+    lon: -77.404
+    activities: [skiing]    # any of: hiking, biking, skiing
 
-  - id: mohonk-preserve
-    name: Mohonk Preserve
-    lat: 41.7684
-    lon: -74.1566
-    activities: [hiking, biking]
-
-  - id: windham-mountain
-    name: Windham Mountain
-    lat: 42.2943
-    lon: -74.2535
+  - id: gore-mountain
+    name: Gore Mountain
+    lat: 43.6825
+    lon: -73.9917
     activities: [skiing]
+
+  - id: whiteface-mountain
+    name: Whiteface Mountain
+    lat: 44.365865
+    lon: -73.903139
+    activities: [skiing]
+
+  - id: stowe-mountain
+    name: Stowe Mountain
+    lat: 44.5006
+    lon: -72.7183
+    activities: [skiing]
+
+  - id: mendon-ponds-park 
+    name: Mendon Ponds Park
+    lat: 42.998952
+    lon: -77.5638868
+    activities: [hiking]
+
+  - id: harriet-hollister-park
+    name: Harriet Hollister Park
+    lat: 42.689
+    lon: -77.512
+    activities: [hiking,skiing]
+
+  - id: boughton-park
+    name: Boughton. Park
+    lat: 42.93471
+    lon: -77.43973
+    activities: [hiking]
