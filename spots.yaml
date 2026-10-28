@@ -1,0 +1,26 @@
+# Config for gooddays. No locations or settings are hard-coded in the code.
+
+settings:
+  # NWS requires a descriptive User-Agent with contact info.
+  nws_user_agent: "gooddays (ajkramer90@gmail.com)"
+  # IANA timezone passed to Open-Meteo; hourly/daily times are local to it.
+  timezone: America/New_York
+
+spots:
+  - id: bear-mountain       # unique, stable slug; used in logs and data/raw paths
+    name: Bear Mountain
+    lat: 41.3118
+    lon: -74.0083
+    activities: [hiking]    # any of: hiking, biking, skiing
+
+  - id: mohonk-preserve
+    name: Mohonk Preserve
+    lat: 41.7684
+    lon: -74.1566
+    activities: [hiking, biking]
+
+  - id: windham-mountain
+    name: Windham Mountain
+    lat: 42.2943
+    lon: -74.2535
+    activities: [skiing]
