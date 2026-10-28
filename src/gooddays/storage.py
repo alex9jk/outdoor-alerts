@@ -4,12 +4,19 @@ The pipeline depends on the `Storage` protocol, not on YAML, so a
 DynamoDB-backed implementation can replace `LocalStorage` later.
 """
 
+import os
+import re
 from pathlib import Path
 from typing import Any, Protocol, get_args
 
 import yaml
 
 from gooddays.models import Activity, Settings, Spot
+
+USER_AGENT_ENV_VAR = "GOODDAYS_NWS_USER_AGENT"
+
+# Spot ids end up in log lines and data/raw/{date}/{spot_id}/ paths.
+_SLUG = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 
 
 class ConfigError(ValueError):
@@ -32,8 +39,15 @@ class LocalStorage:
         raw = self._load().get("settings")
         if not isinstance(raw, dict):
             raise ConfigError("missing 'settings' mapping")
+        # The env var wins so contact details needn't be committed to spots.yaml.
+        user_agent = os.environ.get(USER_AGENT_ENV_VAR, "").strip()
+        if not user_agent and "nws_user_agent" not in raw:
+            raise ConfigError(
+                f"set {USER_AGENT_ENV_VAR} or settings.nws_user_agent in {self._path}"
+            )
         return Settings(
-            nws_user_agent=_require(raw, "nws_user_agent", str, "settings"),
+            nws_user_agent=user_agent
+            or _require(raw, "nws_user_agent", str, "settings"),
             timezone=_require(raw, "timezone", str, "settings"),
         )
 
@@ -81,8 +95,14 @@ def _parse_spot(index: int, item: object) -> Spot:
     ):
         raise ConfigError(f"{where}.activities must be a non-empty list of {valid}")
 
+    spot_id = _require(item, "id", str, where)
+    if not _SLUG.fullmatch(spot_id):
+        raise ConfigError(
+            f"{where}.id must be a lowercase slug like 'bear-mountain': {spot_id!r}"
+        )
+
     return Spot(
-        id=_require(item, "id", str, where),
+        id=spot_id,
         name=_require(item, "name", str, where),
         lat=lat,
         lon=lon,
