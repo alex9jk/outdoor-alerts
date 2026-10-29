@@ -159,3 +159,10 @@ def test_empty_settings_values(tmp_path: Path, body: str) -> None:
     text = "settings:\n  timezone: America/New_York\n" + body + "spots:\n" + SPOT
     with pytest.raises(ConfigError):
         write(tmp_path, text).get_settings()
+
+
+@pytest.mark.parametrize("name", ["America/Nowhere", "Eastern", "../etc/passwd", "."])
+def test_invalid_timezone(tmp_path: Path, name: str) -> None:
+    text = f"settings:\n  timezone: '{name}'\n  nws_user_agent: x\nspots:\n" + SPOT
+    with pytest.raises(ConfigError, match="valid IANA timezone"):
+        write(tmp_path, text).get_settings()
