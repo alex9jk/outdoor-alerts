@@ -8,7 +8,6 @@ import httpx
 import pytest
 import respx
 
-from gooddays.fetch import http
 from gooddays.fetch.http import MAX_ATTEMPTS, FetchError
 from gooddays.fetch.nws import ALERTS_URL, fetch_alerts
 from gooddays.fetch.open_meteo import FORECAST_URL, fetch_forecast
@@ -27,17 +26,6 @@ SETTINGS = Settings(
 def fixture(name: str) -> dict[str, Any]:
     data: dict[str, Any] = json.loads((FIXTURES / name).read_text())
     return data
-
-
-@pytest.fixture(autouse=True)
-def no_sleep(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    delays: list[float] = []
-
-    async def fake_sleep(seconds: float) -> None:
-        delays.append(seconds)
-
-    monkeypatch.setattr(http, "_sleep", fake_sleep)
-    return delays
 
 
 @pytest.fixture

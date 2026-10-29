@@ -62,7 +62,8 @@ class SpotConditions:
     fetched_at: datetime
     hourly: tuple[HourlyConditions, ...]
     daylight: tuple[DaylightWindow, ...]  # one per forecast day
-    alerts: tuple[Alert, ...]
+    # None means unknown (the NWS fetch failed); () means checked, none active.
+    alerts: tuple[Alert, ...] | None
 
 
 @dataclass(frozen=True, slots=True)
