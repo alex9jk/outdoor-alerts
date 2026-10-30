@@ -35,5 +35,8 @@ async def fetch_forecast(
         "wind_speed_unit": "mph",
         "precipitation_unit": "inch",
         "timezone": settings.timezone,
+        # Without this, times are local labels at ONE fixed UTC offset for the whole
+        # response, which is an hour off after a DST change. Unix times are exact.
+        "timeformat": "unixtime",
     }
     return await get_json(client, "open_meteo", FORECAST_URL, params=params)

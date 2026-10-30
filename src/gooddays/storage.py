@@ -46,9 +46,11 @@ class LocalStorage:
             raise ConfigError(
                 f"set {USER_AGENT_ENV_VAR} or settings.nws_user_agent in {self._path}"
             )
+        user_agent = user_agent or _require(raw, "nws_user_agent", str, "settings")
+        if not user_agent.isascii():
+            raise ConfigError("the NWS user agent must be ASCII (it is an HTTP header)")
         return Settings(
-            nws_user_agent=user_agent
-            or _require(raw, "nws_user_agent", str, "settings"),
+            nws_user_agent=user_agent,
             timezone=_parse_timezone(_require(raw, "timezone", str, "settings")),
         )
 

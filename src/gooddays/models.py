@@ -69,7 +69,7 @@ class SpotConditions:
 @dataclass(frozen=True, slots=True)
 class SpotError:
     spot_id: str
-    source: Literal["open_meteo", "nws", "normalize"]
+    source: Literal["open_meteo", "nws", "normalize", "unexpected"]
     message: str
     status_code: int | None = None  # set for HTTP errors
 

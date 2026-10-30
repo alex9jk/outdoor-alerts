@@ -58,13 +58,15 @@ async def get_json(
             )
         except httpx.TimeoutException as e:
             failure = FetchError(source, f"timeout: {type(e).__name__}")
-        except httpx.HTTPError as e:
-            # Connection errors etc.: not in the retry policy, fail this spot.
+        except (httpx.HTTPError, httpx.InvalidURL, UnicodeError) as e:
+            # Connection errors, a request that can't be built (e.g. a non-ASCII
+            # header value), etc.: not in the retry policy, fail this spot.
             raise FetchError(source, f"request failed: {type(e).__name__}: {e}") from e
         else:
             status = response.status_code
-            if status < 400:
+            if 200 <= status < 300:
                 return _parse_json_object(source, response)
+            # Redirects aren't followed, so 3xx is a failure like any other 4xx.
             failure = FetchError(source, f"HTTP {status}", status)
             if status < 500:
                 logger.warning(

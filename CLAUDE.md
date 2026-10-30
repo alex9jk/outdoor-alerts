@@ -46,6 +46,8 @@ spots.yaml
    - daily: `sunrise`, `sunset`
    - units: `temperature_unit=fahrenheit`, `wind_speed_unit=mph`,
      `precipitation_unit=inch`, `timezone=America/New_York`
+   - `timeformat=unixtime`: with iso8601, Open-Meteo labels every time at one fixed
+     UTC offset for the whole response, which is an hour off after a DST change.
 2. Call the NWS API for active alerts at the spot's lat/lon
    (`/alerts/active?point={lat},{lon}`). NWS requires a descriptive
    `User-Agent` header; read it from config.
