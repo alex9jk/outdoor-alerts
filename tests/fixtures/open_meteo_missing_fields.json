@@ -1,0 +1,48 @@
+{
+  "hourly": {
+    "time": [
+      "2026-06-15T09:00",
+      "2026-06-15T10:00",
+      "2026-06-15T11:00"
+    ],
+    "temperature_2m": [
+      60.0,
+      null,
+      62.0
+    ],
+    "precipitation_probability": [
+      null,
+      null,
+      null
+    ],
+    "precipitation": [
+      0.0,
+      0.0,
+      null
+    ],
+    "wind_speed_10m": [
+      5.0,
+      6.0,
+      7.0
+    ],
+    "weather_code": [
+      1,
+      null,
+      2
+    ]
+  },
+  "daily": {
+    "time": [
+      "2026-06-15",
+      "2026-06-16"
+    ],
+    "sunrise": [
+      "2026-06-15T05:25",
+      null
+    ],
+    "sunset": [
+      "2026-06-15T20:35",
+      "2026-06-16T20:36"
+    ]
+  }
+}

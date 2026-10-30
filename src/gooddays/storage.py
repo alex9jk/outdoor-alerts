@@ -8,6 +8,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Protocol, get_args
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -48,7 +49,7 @@ class LocalStorage:
         return Settings(
             nws_user_agent=user_agent
             or _require(raw, "nws_user_agent", str, "settings"),
-            timezone=_require(raw, "timezone", str, "settings"),
+            timezone=_parse_timezone(_require(raw, "timezone", str, "settings")),
         )
 
     def get_spots(self) -> list[Spot]:
@@ -73,6 +74,17 @@ class LocalStorage:
         if not isinstance(data, dict):
             raise ConfigError(f"{self._path} must contain a mapping at the top level")
         return data
+
+
+def _parse_timezone(name: str) -> str:
+    # Fail at load time on a typo, not later as an error on every spot.
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError, OSError) as e:
+        raise ConfigError(
+            f"settings.timezone is not a valid IANA timezone: {name!r}"
+        ) from e
+    return name
 
 
 def _parse_spot(index: int, item: object) -> Spot:
