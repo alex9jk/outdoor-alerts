@@ -30,7 +30,7 @@ src/gooddays/
     open_meteo.py  # forecast client
     nws.py         # alerts client
     service.py     # fetch_conditions(): orchestrates per spot
-    raw.py         # --save-raw writer and --fixtures replay fetchers
+    raw.py         # --save-raw snapshots and --fixtures replay fetchers
   report.py        # text and JSON rendering of a FetchResult
   cli.py           # `python -m gooddays fetch`
 tests/
@@ -85,6 +85,9 @@ spots.yaml
 - Install: `uv sync`
 - Run: `uv run python -m gooddays fetch [--spots PATH] [--json] [--save-raw | --fixtures DIR]`
   (needs `GOODDAYS_NWS_USER_AGENT`; `--fixtures` replays a `data/raw/{date}/` folder)
+  Exit codes: 0 ok (spot errors alone still exit 0), 1 every spot failed, 2 bad usage/config,
+  3 `--save-raw` couldn't save everything, 70 unexpected error. `--save-raw` replaces that day's
+  folder only when the run completes, so a saved folder is never a mix of two runs.
 - Test: `uv run pytest`
 - Lint/types: `uv run ruff check . && uv run mypy src`
 

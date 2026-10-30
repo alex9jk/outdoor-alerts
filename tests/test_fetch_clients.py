@@ -253,6 +253,6 @@ async def test_failing_callback_does_not_fail_the_request(
         result = await fetch_alerts(client, SPOT, SETTINGS, on_raw=broken)
 
     assert result == load_fixture("nws_alerts_none.json")
-    assert "raw_callback_failed spot=bristol source=nws error=OSError: disk full" in (
+    assert "raw_callback_failed spot=bristol source=nws error='OSError: disk full'" in (
         caplog.text
     )

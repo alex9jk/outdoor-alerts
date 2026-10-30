@@ -83,23 +83,26 @@ async def fetch_conditions(
     *,
     on_raw: RawCallback | None = None,
     fetchers: Fetchers | None = None,
+    fetched_at: datetime | None = None,
 ) -> FetchResult:
     """Fetch every spot concurrently. One bad spot never fails the run.
 
     `on_raw` receives each raw API response (used by --save-raw). `fetchers`
     replaces the live API calls (used by --fixtures); it takes precedence over
-    `on_raw`, which only applies to the live fetchers.
+    `on_raw`, which only applies to the live fetchers. `fetched_at` overrides
+    the fetch time on every result (a replay passes when the data was saved).
 
     - Open-Meteo fails: the spot is dropped and the error recorded.
     - NWS fails: the spot is kept with `alerts=None` (unknown) and the error recorded.
     - Anything unexpected inside one spot is recorded for that spot only.
     """
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_SPOTS)
-    fetchers = fetchers or live_fetchers(on_raw)
+    if fetchers is None:
+        fetchers = live_fetchers(on_raw)
     async with httpx.AsyncClient() as client:
         outcomes = await asyncio.gather(
             *(
-                _fetch_spot(client, semaphore, spot, settings, fetchers)
+                _fetch_spot(client, semaphore, spot, settings, fetchers, fetched_at)
                 for spot in spots
             )
         )
@@ -123,16 +126,18 @@ async def _fetch_spot(
     spot: Spot,
     settings: Settings,
     fetchers: Fetchers,
+    fetched_at: datetime | None,
 ) -> tuple[SpotConditions | None, list[SpotError]]:
     try:
-        return await _fetch_spot_unguarded(client, semaphore, spot, settings, fetchers)
+        return await _fetch_spot_unguarded(
+            client, semaphore, spot, settings, fetchers, fetched_at
+        )
     except Exception as e:  # last resort so one spot can't take down the run
         # CancelledError is a BaseException, so cancellation still propagates.
         logger.error(
-            "spot_unexpected spot=%s error=%s: %s",
+            "spot_unexpected spot=%s error=%r",
             spot.id,
-            type(e).__name__,
-            e,
+            f"{type(e).__name__}: {e}",
             exc_info=True,
         )
         return None, [SpotError(spot.id, "unexpected", f"{type(e).__name__}: {e}")]
@@ -144,6 +149,7 @@ async def _fetch_spot_unguarded(
     spot: Spot,
     settings: Settings,
     fetchers: Fetchers,
+    fetched_at: datetime | None,
 ) -> tuple[SpotConditions | None, list[SpotError]]:
     forecast_raw: dict[str, Any] | BaseException
     alerts_raw: dict[str, Any] | BaseException
@@ -180,7 +186,7 @@ async def _fetch_spot_unguarded(
 
     conditions = SpotConditions(
         spot=spot,
-        fetched_at=datetime.now(UTC),
+        fetched_at=fetched_at or datetime.now(UTC),
         hourly=hourly,
         daylight=daylight,
         alerts=alerts,

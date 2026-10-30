@@ -1,3 +1,4 @@
+import dataclasses
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -44,7 +45,7 @@ def test_text_summarizes_each_day() -> None:
 
     assert "Bristol (bristol)  fetched " in text
     assert (
-        "  2026-06-15  temp 68-75F  precip 0.00in  (max 5%)  wind max 6mph  "
+        "  2026-06-15  temp 68 to 75F  precip 0.00in  (max 5%)  wind max 6mph  "
         "gusts 11mph  snow 0.0in  daylight 05:25-20:35"
     ) in text
     assert text.endswith("1 spot(s) ok, 0 error(s)")
@@ -54,7 +55,7 @@ def test_text_shows_na_for_missing_values() -> None:
     text = to_text(result_of(conditions("open_meteo_missing_fields.json")))
 
     assert (
-        "  2026-06-15  temp 60-62F  precip 0.00in  (max n/a)  wind max 7mph  "
+        "  2026-06-15  temp 60 to 62F  precip 0.00in  (max n/a)  wind max 7mph  "
         "gusts n/a  snow n/a  daylight 05:25-20:35"
     ) in text
 
@@ -147,3 +148,22 @@ def test_json_keeps_missing_values_as_null_and_includes_errors() -> None:
             "status_code": 503,
         }
     ]
+
+
+def test_text_header_uses_the_settings_timezone_not_the_machines() -> None:
+    # 12:00 UTC is 08:00 EDT, the zone the day rows use.
+    text = to_text(result_of(conditions()))
+
+    assert "Bristol (bristol)  fetched 2026-06-15 08:00 EDT" in text
+
+
+def test_text_negative_temperatures_are_readable() -> None:
+    cold = conditions()
+    hours = tuple(
+        dataclasses.replace(h, temperature_f=t)
+        for h, t in zip(cold.hourly, (-5.0, -3.0, -2.0), strict=True)
+    )
+
+    text = to_text(result_of(dataclasses.replace(cold, hourly=hours)))
+
+    assert "temp -5 to -2F" in text

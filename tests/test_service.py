@@ -614,7 +614,7 @@ async def test_unexpected_errors_are_logged(
     with caplog.at_level(logging.INFO, logger="gooddays.fetch.service"):
         await fetch_conditions([make_spot(0)], SETTINGS)
 
-    assert "spot_unexpected spot=spot-0 error=RuntimeError: boom" in caplog.text
+    assert "spot_unexpected spot=spot-0 error='RuntimeError: boom'" in caplog.text
 
 
 # Raw-response callback and replaceable fetchers.
@@ -676,3 +676,15 @@ async def test_custom_fetchers_replace_the_live_calls() -> None:
     assert conditions.hourly[2].weather_code == 65
     assert conditions.alerts is not None
     assert conditions.alerts[0].event == "Winter Storm Warning"
+
+
+@respx.mock
+async def test_fetched_at_can_be_overridden() -> None:
+    mock_apis()
+    when = datetime(2026, 1, 15, 9, 30, tzinfo=UTC)
+
+    result = await fetch_conditions(
+        [make_spot(0), make_spot(1)], SETTINGS, fetched_at=when
+    )
+
+    assert [r.fetched_at for r in result.results] == [when, when]

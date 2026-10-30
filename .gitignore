@@ -220,4 +220,4 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Raw API responses saved by --save-raw
-data/
+/data/

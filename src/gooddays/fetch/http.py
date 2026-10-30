@@ -102,11 +102,10 @@ def notify_raw(
         on_raw(spot_id, source, raw)
     except Exception as e:
         logger.warning(
-            "raw_callback_failed spot=%s source=%s error=%s: %s",
+            "raw_callback_failed spot=%s source=%s error=%r",
             spot_id,
             source,
-            type(e).__name__,
-            e,
+            f"{type(e).__name__}: {e}",
         )
 
 

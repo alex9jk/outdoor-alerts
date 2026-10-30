@@ -5,11 +5,15 @@ timezone-aware. Weather fields are optional because APIs sometimes omit
 values; fetch_conditions normalizes but never fills in or judges them.
 """
 
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Literal
 
 Activity = Literal["hiking", "biking", "skiing"]
+
+# Spot ids end up in log lines and data/raw/{date}/{spot_id}/ paths.
+SPOT_ID_PATTERN = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 
 
 @dataclass(frozen=True, slots=True)

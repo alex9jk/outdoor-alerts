@@ -6,7 +6,8 @@ Text shows plain per-day summaries of the fetched data. It does no scoring.
 import dataclasses
 import json
 from collections import defaultdict
-from datetime import date, datetime
+from collections.abc import Callable
+from datetime import UTC, date, datetime, tzinfo
 from typing import Any
 
 from gooddays.models import (
@@ -48,7 +49,9 @@ def _jsonable(value: Any) -> Any:
 
 def _spot_lines(conditions: SpotConditions) -> list[str]:
     spot = conditions.spot
-    fetched = conditions.fetched_at.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    fetched = conditions.fetched_at.astimezone(_data_zone(conditions)).strftime(
+        "%Y-%m-%d %H:%M %Z"
+    )
     lines = [f"{spot.name} ({spot.id})  fetched {fetched}"]
 
     by_day: dict[date, list[HourlyConditions]] = defaultdict(list)
@@ -62,19 +65,24 @@ def _spot_lines(conditions: SpotConditions) -> list[str]:
     return lines
 
 
-def _day_summary(hours: list[HourlyConditions], window: DaylightWindow | None) -> str:
-    def values(field: str) -> list[float]:
-        return [v for h in hours if (v := getattr(h, field)) is not None]
+def _data_zone(conditions: SpotConditions) -> tzinfo:
+    """The zone the day rows use (the settings timezone), not the machine's."""
+    return conditions.hourly[0].time.tzinfo or UTC if conditions.hourly else UTC
 
-    temps = values("temperature_f")
-    probs = values("precipitation_probability_pct")
-    precip = values("precipitation_in")
-    winds = values("wind_speed_mph")
-    gusts = values("wind_gust_mph")
-    snow = values("snowfall_in")
+
+def _day_summary(hours: list[HourlyConditions], window: DaylightWindow | None) -> str:
+    def values(get: Callable[[HourlyConditions], float | None]) -> list[float]:
+        return [v for h in hours if (v := get(h)) is not None]
+
+    temps = values(lambda h: h.temperature_f)
+    probs = values(lambda h: h.precipitation_probability_pct)
+    precip = values(lambda h: h.precipitation_in)
+    winds = values(lambda h: h.wind_speed_mph)
+    gusts = values(lambda h: h.wind_gust_mph)
+    snow = values(lambda h: h.snowfall_in)
 
     parts = [
-        f"temp {min(temps):.0f}-{max(temps):.0f}F" if temps else "temp n/a",
+        f"temp {min(temps):.0f} to {max(temps):.0f}F" if temps else "temp n/a",
         f"precip {sum(precip):.2f}in" if precip else "precip n/a",
         f"(max {max(probs):.0f}%)" if probs else "(max n/a)",
         f"wind max {max(winds):.0f}mph" if winds else "wind n/a",
