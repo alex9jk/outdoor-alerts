@@ -6,7 +6,7 @@ request, return the parsed JSON", and the policy is tested once.
 
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 import httpx
@@ -14,6 +14,9 @@ import httpx
 logger = logging.getLogger(__name__)
 
 Source = Literal["open_meteo", "nws"]
+
+# Called with (spot_id, source, raw parsed JSON) for every successful response.
+RawCallback = Callable[[str, Source, dict[str, Any]], None]
 
 TIMEOUT_SECONDS = 10.0
 MAX_ATTEMPTS = 3
@@ -87,6 +90,24 @@ async def get_json(
         await _sleep(BACKOFF_BASE_SECONDS * 2 ** (attempt - 1))
 
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+def notify_raw(
+    on_raw: RawCallback | None, spot_id: str, source: Source, raw: dict[str, Any]
+) -> None:
+    """Hand a raw response to the callback; its failures never fail the spot."""
+    if on_raw is None:
+        return
+    try:
+        on_raw(spot_id, source, raw)
+    except Exception as e:
+        logger.warning(
+            "raw_callback_failed spot=%s source=%s error=%s: %s",
+            spot_id,
+            source,
+            type(e).__name__,
+            e,
+        )
 
 
 def _parse_json_object(source: Source, response: httpx.Response) -> dict[str, Any]:

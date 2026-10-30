@@ -13,6 +13,7 @@ from gooddays.fetch.nws import ALERTS_URL
 from gooddays.fetch.open_meteo import FORECAST_URL
 from gooddays.fetch.service import (
     MAX_CONCURRENT_SPOTS,
+    Fetchers,
     NormalizeError,
     fetch_conditions,
     normalize_alerts,
@@ -405,10 +406,12 @@ async def test_unexpected_exception_from_a_client_is_recorded(
     mock_apis()
     real = service.fetch_forecast
 
-    async def flaky(client: httpx.AsyncClient, spot: Spot, settings: Settings) -> Any:
+    async def flaky(
+        client: httpx.AsyncClient, spot: Spot, settings: Settings, **kwargs: Any
+    ) -> Any:
         if spot.id == "spot-1":
             raise RuntimeError("boom")
-        return await real(client, spot, settings)
+        return await real(client, spot, settings, **kwargs)
 
     monkeypatch.setattr(service, "fetch_forecast", flaky)
 
@@ -451,7 +454,7 @@ async def test_unexpected_exception_during_normalization_is_recorded(
 async def test_cancellation_is_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_apis()
 
-    async def cancelled(*args: Any) -> Any:
+    async def cancelled(*args: Any, **kwargs: Any) -> Any:
         raise asyncio.CancelledError
 
     monkeypatch.setattr(service, "fetch_forecast", cancelled)
@@ -498,7 +501,7 @@ async def test_unexpected_exception_from_nws_client_keeps_weather(
 ) -> None:
     mock_apis()
 
-    async def bad_header(*args: Any) -> Any:
+    async def bad_header(*args: Any, **kwargs: Any) -> Any:
         raise UnicodeEncodeError("ascii", "é", 0, 1, "ordinal not in range")
 
     monkeypatch.setattr(service, "fetch_alerts", bad_header)
@@ -612,3 +615,64 @@ async def test_unexpected_errors_are_logged(
         await fetch_conditions([make_spot(0)], SETTINGS)
 
     assert "spot_unexpected spot=spot-0 error=RuntimeError: boom" in caplog.text
+
+
+# Raw-response callback and replaceable fetchers.
+
+
+@respx.mock
+async def test_on_raw_receives_every_response() -> None:
+    mock_apis()
+    seen: list[tuple[str, str]] = []
+
+    await fetch_conditions(
+        [make_spot(0), make_spot(1)],
+        SETTINGS,
+        on_raw=lambda spot_id, source, raw: seen.append((spot_id, source)),
+    )
+
+    assert sorted(seen) == [
+        ("spot-0", "nws"),
+        ("spot-0", "open_meteo"),
+        ("spot-1", "nws"),
+        ("spot-1", "open_meteo"),
+    ]
+
+
+@respx.mock
+async def test_failing_on_raw_does_not_fail_any_spot() -> None:
+    mock_apis()
+
+    def broken(spot_id: str, source: str, raw: dict[str, Any]) -> None:
+        raise OSError("disk full")
+
+    result = await fetch_conditions(
+        [make_spot(0), make_spot(1)], SETTINGS, on_raw=broken
+    )
+
+    assert len(result.results) == 2
+    assert result.errors == []
+
+
+async def test_custom_fetchers_replace_the_live_calls() -> None:
+    async def forecast(
+        client: httpx.AsyncClient, spot: Spot, settings: Settings
+    ) -> Any:
+        return load_fixture("open_meteo_rainy.json")
+
+    async def alerts(client: httpx.AsyncClient, spot: Spot, settings: Settings) -> Any:
+        return load_fixture("nws_alerts_winter_storm.json")
+
+    # No respx mock is active, so any real HTTP call would fail the test.
+    result = await fetch_conditions(
+        [make_spot(0)],
+        SETTINGS,
+        fetchers=Fetchers(forecast=forecast, alerts=alerts),
+        on_raw=lambda *args: pytest.fail("on_raw only applies to live fetchers"),
+    )
+
+    assert result.errors == []
+    (conditions,) = result.results
+    assert conditions.hourly[2].weather_code == 65
+    assert conditions.alerts is not None
+    assert conditions.alerts[0].event == "Winter Storm Warning"

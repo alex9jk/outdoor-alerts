@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 
-from gooddays.fetch.http import get_json
+from gooddays.fetch.http import RawCallback, get_json, notify_raw
 from gooddays.models import Settings, Spot
 
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -23,7 +23,11 @@ FORECAST_DAYS = 2
 
 
 async def fetch_forecast(
-    client: httpx.AsyncClient, spot: Spot, settings: Settings
+    client: httpx.AsyncClient,
+    spot: Spot,
+    settings: Settings,
+    *,
+    on_raw: RawCallback | None = None,
 ) -> dict[str, Any]:
     params: dict[str, str | int] = {
         "latitude": str(spot.lat),
@@ -39,4 +43,6 @@ async def fetch_forecast(
         # response, which is an hour off after a DST change. Unix times are exact.
         "timeformat": "unixtime",
     }
-    return await get_json(client, "open_meteo", FORECAST_URL, params=params)
+    raw = await get_json(client, "open_meteo", FORECAST_URL, params=params)
+    notify_raw(on_raw, spot.id, "open_meteo", raw)
+    return raw

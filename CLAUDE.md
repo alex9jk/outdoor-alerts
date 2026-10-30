@@ -30,6 +30,8 @@ src/gooddays/
     open_meteo.py  # forecast client
     nws.py         # alerts client
     service.py     # fetch_conditions(): orchestrates per spot
+    raw.py         # --save-raw writer and --fixtures replay fetchers
+  report.py        # text and JSON rendering of a FetchResult
   cli.py           # `python -m gooddays fetch`
 tests/
   fixtures/        # saved raw API responses (JSON)
@@ -81,7 +83,8 @@ spots.yaml
 
 ## Commands
 - Install: `uv sync`
-- Run: `uv run python -m gooddays fetch [--save-raw] [--fixtures]`
+- Run: `uv run python -m gooddays fetch [--spots PATH] [--json] [--save-raw | --fixtures DIR]`
+  (needs `GOODDAYS_NWS_USER_AGENT`; `--fixtures` replays a `data/raw/{date}/` folder)
 - Test: `uv run pytest`
 - Lint/types: `uv run ruff check . && uv run mypy src`
 

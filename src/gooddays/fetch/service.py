@@ -7,14 +7,15 @@ so it can be tested from saved fixtures alone.
 import asyncio
 import logging
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
 
-from gooddays.fetch.http import FetchError, Source
+from gooddays.fetch.http import FetchError, RawCallback, Source
 from gooddays.fetch.nws import fetch_alerts
 from gooddays.fetch.open_meteo import HOURLY_VARIABLES, fetch_forecast
 from gooddays.models import (
@@ -44,21 +45,63 @@ _PARSE_ERRORS = (
 )
 
 
+# Gets the raw response for one spot. The live ones call the API clients; the
+# replay ones (fetch/raw.py) read saved files.
+Fetcher = Callable[[httpx.AsyncClient, Spot, Settings], Awaitable[dict[str, Any]]]
+
+
+@dataclass(frozen=True, slots=True)
+class Fetchers:
+    forecast: Fetcher
+    alerts: Fetcher
+
+
 class NormalizeError(Exception):
     """A response was fetched but didn't have the shape we expected."""
 
 
-async def fetch_conditions(spots: Sequence[Spot], settings: Settings) -> FetchResult:
+def live_fetchers(on_raw: RawCallback | None = None) -> Fetchers:
+    """Fetchers that call the real APIs, passing each raw response to `on_raw`."""
+
+    # The clients are looked up when called (not captured) so tests can patch them.
+    async def forecast(
+        client: httpx.AsyncClient, spot: Spot, settings: Settings
+    ) -> dict[str, Any]:
+        return await fetch_forecast(client, spot, settings, on_raw=on_raw)
+
+    async def alerts(
+        client: httpx.AsyncClient, spot: Spot, settings: Settings
+    ) -> dict[str, Any]:
+        return await fetch_alerts(client, spot, settings, on_raw=on_raw)
+
+    return Fetchers(forecast=forecast, alerts=alerts)
+
+
+async def fetch_conditions(
+    spots: Sequence[Spot],
+    settings: Settings,
+    *,
+    on_raw: RawCallback | None = None,
+    fetchers: Fetchers | None = None,
+) -> FetchResult:
     """Fetch every spot concurrently. One bad spot never fails the run.
+
+    `on_raw` receives each raw API response (used by --save-raw). `fetchers`
+    replaces the live API calls (used by --fixtures); it takes precedence over
+    `on_raw`, which only applies to the live fetchers.
 
     - Open-Meteo fails: the spot is dropped and the error recorded.
     - NWS fails: the spot is kept with `alerts=None` (unknown) and the error recorded.
     - Anything unexpected inside one spot is recorded for that spot only.
     """
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_SPOTS)
+    fetchers = fetchers or live_fetchers(on_raw)
     async with httpx.AsyncClient() as client:
         outcomes = await asyncio.gather(
-            *(_fetch_spot(client, semaphore, spot, settings) for spot in spots)
+            *(
+                _fetch_spot(client, semaphore, spot, settings, fetchers)
+                for spot in spots
+            )
         )
 
     result = FetchResult(
@@ -79,9 +122,10 @@ async def _fetch_spot(
     semaphore: asyncio.Semaphore,
     spot: Spot,
     settings: Settings,
+    fetchers: Fetchers,
 ) -> tuple[SpotConditions | None, list[SpotError]]:
     try:
-        return await _fetch_spot_unguarded(client, semaphore, spot, settings)
+        return await _fetch_spot_unguarded(client, semaphore, spot, settings, fetchers)
     except Exception as e:  # last resort so one spot can't take down the run
         # CancelledError is a BaseException, so cancellation still propagates.
         logger.error(
@@ -99,13 +143,14 @@ async def _fetch_spot_unguarded(
     semaphore: asyncio.Semaphore,
     spot: Spot,
     settings: Settings,
+    fetchers: Fetchers,
 ) -> tuple[SpotConditions | None, list[SpotError]]:
     forecast_raw: dict[str, Any] | BaseException
     alerts_raw: dict[str, Any] | BaseException
     async with semaphore:
         forecast_raw, alerts_raw = await asyncio.gather(
-            fetch_forecast(client, spot, settings),
-            fetch_alerts(client, spot, settings),
+            fetchers.forecast(client, spot, settings),
+            fetchers.alerts(client, spot, settings),
             return_exceptions=True,
         )
 
