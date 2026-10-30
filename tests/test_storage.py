@@ -166,3 +166,30 @@ def test_invalid_timezone(tmp_path: Path, name: str) -> None:
     text = f"settings:\n  timezone: '{name}'\n  nws_user_agent: x\nspots:\n" + SPOT
     with pytest.raises(ConfigError, match="valid IANA timezone"):
         write(tmp_path, text).get_settings()
+
+
+def test_non_ascii_user_agent_from_yaml(tmp_path: Path) -> None:
+    text = (
+        "settings:\n"
+        "  timezone: America/New_York\n"
+        "  nws_user_agent: 'Café (me@example.com)'\n"
+        "spots:\n" + SPOT
+    )
+    with pytest.raises(ConfigError, match="must be ASCII"):
+        write(tmp_path, text).get_settings()
+
+
+def test_non_ascii_user_agent_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(USER_AGENT_ENV_VAR, "Café (me@example.com)")
+    with pytest.raises(ConfigError, match="must be ASCII"):
+        write(tmp_path, VALID).get_settings()
+
+
+def test_spots_file_that_is_not_utf8(tmp_path: Path) -> None:
+    path = tmp_path / "spots.yaml"
+    path.write_bytes(b"\xff\xfe spots: []")
+
+    with pytest.raises(ConfigError, match="not valid UTF-8"):
+        LocalStorage(path).get_spots()

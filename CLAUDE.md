@@ -30,6 +30,8 @@ src/gooddays/
     open_meteo.py  # forecast client
     nws.py         # alerts client
     service.py     # fetch_conditions(): orchestrates per spot
+    raw.py         # --save-raw snapshots and --fixtures replay fetchers
+  report.py        # text and JSON rendering of a FetchResult
   cli.py           # `python -m gooddays fetch`
 tests/
   fixtures/        # saved raw API responses (JSON)
@@ -46,6 +48,8 @@ spots.yaml
    - daily: `sunrise`, `sunset`
    - units: `temperature_unit=fahrenheit`, `wind_speed_unit=mph`,
      `precipitation_unit=inch`, `timezone=America/New_York`
+   - `timeformat=unixtime`: with iso8601, Open-Meteo labels every time at one fixed
+     UTC offset for the whole response, which is an hour off after a DST change.
 2. Call the NWS API for active alerts at the spot's lat/lon
    (`/alerts/active?point={lat},{lon}`). NWS requires a descriptive
    `User-Agent` header; read it from config.
@@ -79,7 +83,11 @@ spots.yaml
 
 ## Commands
 - Install: `uv sync`
-- Run: `uv run python -m gooddays fetch [--save-raw] [--fixtures]`
+- Run: `uv run python -m gooddays fetch [--spots PATH] [--json] [--save-raw | --fixtures DIR]`
+  (needs `GOODDAYS_NWS_USER_AGENT`; `--fixtures` replays a `data/raw/{date}/` folder)
+  Exit codes: 0 ok (spot errors alone still exit 0), 1 every spot failed, 2 bad usage/config,
+  3 `--save-raw` couldn't save everything, 70 unexpected error. `--save-raw` replaces that day's
+  folder only when the run completes, so a saved folder is never a mix of two runs.
 - Test: `uv run pytest`
 - Lint/types: `uv run ruff check . && uv run mypy src`
 

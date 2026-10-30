@@ -6,7 +6,7 @@ request, return the parsed JSON", and the policy is tested once.
 
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 import httpx
@@ -14,6 +14,9 @@ import httpx
 logger = logging.getLogger(__name__)
 
 Source = Literal["open_meteo", "nws"]
+
+# Called with (spot_id, source, raw parsed JSON) for every successful response.
+RawCallback = Callable[[str, Source, dict[str, Any]], None]
 
 TIMEOUT_SECONDS = 10.0
 MAX_ATTEMPTS = 3
@@ -58,13 +61,15 @@ async def get_json(
             )
         except httpx.TimeoutException as e:
             failure = FetchError(source, f"timeout: {type(e).__name__}")
-        except httpx.HTTPError as e:
-            # Connection errors etc.: not in the retry policy, fail this spot.
+        except (httpx.HTTPError, httpx.InvalidURL, UnicodeError) as e:
+            # Connection errors, a request that can't be built (e.g. a non-ASCII
+            # header value), etc.: not in the retry policy, fail this spot.
             raise FetchError(source, f"request failed: {type(e).__name__}: {e}") from e
         else:
             status = response.status_code
-            if status < 400:
+            if 200 <= status < 300:
                 return _parse_json_object(source, response)
+            # Redirects aren't followed, so 3xx is a failure like any other 4xx.
             failure = FetchError(source, f"HTTP {status}", status)
             if status < 500:
                 logger.warning(
@@ -85,6 +90,23 @@ async def get_json(
         await _sleep(BACKOFF_BASE_SECONDS * 2 ** (attempt - 1))
 
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+def notify_raw(
+    on_raw: RawCallback | None, spot_id: str, source: Source, raw: dict[str, Any]
+) -> None:
+    """Hand a raw response to the callback; its failures never fail the spot."""
+    if on_raw is None:
+        return
+    try:
+        on_raw(spot_id, source, raw)
+    except Exception as e:
+        logger.warning(
+            "raw_callback_failed spot=%s source=%s error=%r",
+            spot_id,
+            source,
+            f"{type(e).__name__}: {e}",
+        )
 
 
 def _parse_json_object(source: Source, response: httpx.Response) -> dict[str, Any]:

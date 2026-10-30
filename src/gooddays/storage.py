@@ -5,19 +5,15 @@ DynamoDB-backed implementation can replace `LocalStorage` later.
 """
 
 import os
-import re
 from pathlib import Path
 from typing import Any, Protocol, get_args
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
-from gooddays.models import Activity, Settings, Spot
+from gooddays.models import SPOT_ID_PATTERN, Activity, Settings, Spot
 
 USER_AGENT_ENV_VAR = "GOODDAYS_NWS_USER_AGENT"
-
-# Spot ids end up in log lines and data/raw/{date}/{spot_id}/ paths.
-_SLUG = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 
 
 class ConfigError(ValueError):
@@ -46,9 +42,11 @@ class LocalStorage:
             raise ConfigError(
                 f"set {USER_AGENT_ENV_VAR} or settings.nws_user_agent in {self._path}"
             )
+        user_agent = user_agent or _require(raw, "nws_user_agent", str, "settings")
+        if not user_agent.isascii():
+            raise ConfigError("the NWS user agent must be ASCII (it is an HTTP header)")
         return Settings(
-            nws_user_agent=user_agent
-            or _require(raw, "nws_user_agent", str, "settings"),
+            nws_user_agent=user_agent,
             timezone=_parse_timezone(_require(raw, "timezone", str, "settings")),
         )
 
@@ -66,7 +64,9 @@ class LocalStorage:
 
     def _load(self) -> dict[str, Any]:
         try:
-            data = yaml.safe_load(self._path.read_text())
+            data = yaml.safe_load(self._path.read_text(encoding="utf-8"))
+        except UnicodeDecodeError as e:
+            raise ConfigError(f"{self._path} is not valid UTF-8: {e}") from e
         except OSError as e:
             raise ConfigError(f"cannot read {self._path}: {e}") from e
         except yaml.YAMLError as e:
@@ -108,7 +108,7 @@ def _parse_spot(index: int, item: object) -> Spot:
         raise ConfigError(f"{where}.activities must be a non-empty list of {valid}")
 
     spot_id = _require(item, "id", str, where)
-    if not _SLUG.fullmatch(spot_id):
+    if not SPOT_ID_PATTERN.fullmatch(spot_id):
         raise ConfigError(
             f"{where}.id must be a lowercase slug like 'bear-mountain': {spot_id!r}"
         )
