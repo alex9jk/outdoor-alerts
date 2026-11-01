@@ -1,7 +1,11 @@
+import copy
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
+from gooddays.models import HikingThresholds, SkiingThresholds
 from gooddays.storage import USER_AGENT_ENV_VAR, ConfigError, LocalStorage
 
 SETTINGS = """
@@ -193,3 +197,148 @@ def test_spots_file_that_is_not_utf8(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="not valid UTF-8"):
         LocalStorage(path).get_spots()
+
+
+# --- thresholds ---
+
+THRESHOLDS_DICT: dict[str, Any] = {
+    "hiking": {
+        "min_temperature_f": 45,
+        "max_precipitation_probability_pct": 30,
+        "max_precipitation_in": 0.1,
+        "min_run_hours": 4,
+    },
+    "skiing": {
+        "max_temperature_f": 32,
+        "max_wind_mph": 10,
+        "min_snowfall_in": 0,
+        "min_snow_depth_in": 0,
+        "min_run_hours": 4,
+    },
+}
+
+
+def write_thresholds(tmp_path: Path, thresholds: Any) -> LocalStorage:
+    doc: dict[str, Any] = {"spots": [], "settings": {}}
+    if thresholds is not None:
+        doc["thresholds"] = thresholds
+    return write(tmp_path, yaml.safe_dump(doc))
+
+
+def with_change(path: list[str], value: Any) -> dict[str, Any]:
+    """THRESHOLDS_DICT with the value at `path` replaced (or removed if `...`)."""
+    changed = copy.deepcopy(THRESHOLDS_DICT)
+    node = changed
+    for key in path[:-1]:
+        node = node[key]
+    if value is ...:
+        del node[path[-1]]
+    else:
+        node[path[-1]] = value
+    return changed
+
+
+def test_loads_thresholds(tmp_path: Path) -> None:
+    thresholds = write_thresholds(tmp_path, THRESHOLDS_DICT).get_thresholds()
+
+    assert thresholds.hiking == HikingThresholds(45, 30, 0.1, 4)
+    assert thresholds.skiing == SkiingThresholds(32, 10, 0, 0, 4)
+
+
+def test_repo_spots_yaml_thresholds_are_valid() -> None:
+    storage = LocalStorage(Path(__file__).parent.parent / "spots.yaml")
+
+    thresholds = storage.get_thresholds()
+
+    assert thresholds.hiking.min_temperature_f == 45
+    assert thresholds.skiing.max_temperature_f == 32
+
+
+@pytest.mark.parametrize(
+    ("thresholds", "message"),
+    [
+        (None, "missing 'thresholds'"),
+        ("hiking", "missing 'thresholds'"),
+        (with_change(["hiking"], ...), "missing 'thresholds.hiking'"),
+        (with_change(["skiing"], ...), "missing 'thresholds.skiing'"),
+        (
+            with_change(["hiking", "min_temperature_f"], ...),
+            "hiking.min_temperature_f must be a number",
+        ),
+        (
+            with_change(["skiing", "max_wind_mph"], ...),
+            "skiing.max_wind_mph must be a number",
+        ),
+        (
+            with_change(["skiing", "min_snow_depth_in"], ...),
+            "min_snow_depth_in must be a number",
+        ),
+        (
+            with_change(["hiking", "min_temperature_f"], "warm"),
+            "min_temperature_f must be a number",
+        ),
+        (
+            with_change(["hiking", "min_temperature_f"], True),
+            "min_temperature_f must be a number",
+        ),
+        (
+            with_change(["hiking", "min_temperature_f"], float("inf")),
+            "must be a finite number",
+        ),
+        (
+            with_change(["hiking", "max_precipitation_probability_pct"], 101),
+            "at most 100",
+        ),
+        (
+            with_change(["hiking", "max_precipitation_probability_pct"], -1),
+            "at least 0",
+        ),
+        (with_change(["hiking", "max_precipitation_in"], -0.1), "at least 0"),
+        (with_change(["skiing", "max_wind_mph"], -1), "at least 0"),
+        (with_change(["skiing", "min_snowfall_in"], -1), "at least 0"),
+        (with_change(["skiing", "min_snow_depth_in"], -1), "at least 0"),
+        (
+            with_change(["hiking", "min_run_hours"], ...),
+            "min_run_hours must be a whole number",
+        ),
+        (
+            with_change(["hiking", "min_run_hours"], 0),
+            "min_run_hours must be a whole number",
+        ),
+        (
+            with_change(["skiing", "min_run_hours"], 2.5),
+            "min_run_hours must be a whole number",
+        ),
+        (
+            with_change(["skiing", "min_run_hours"], True),
+            "min_run_hours must be a whole number",
+        ),
+        (with_change(["hiking", "min_temperatur_f"], 45), "unknown key"),
+    ],
+)
+def test_invalid_thresholds(tmp_path: Path, thresholds: Any, message: str) -> None:
+    with pytest.raises(ConfigError, match=message):
+        write_thresholds(tmp_path, thresholds).get_thresholds()
+
+
+def test_unknown_keys_are_reported_before_missing_ones(tmp_path: Path) -> None:
+    # The typo'd key is reported as unknown before the missing one.
+    changed = with_change(["hiking", "min_temperature_f"], ...)
+    changed["hiking"]["min_temperatur_f"] = 45
+
+    with pytest.raises(ConfigError, match=r"unknown key\(s\): \['min_temperatur_f'\]"):
+        write_thresholds(tmp_path, changed).get_thresholds()
+
+
+def test_biking_thresholds_are_refused(tmp_path: Path) -> None:
+    changed = {**THRESHOLDS_DICT, "biking": {"min_temperature_f": 50}}
+
+    with pytest.raises(ConfigError, match="no biking rules yet"):
+        write_thresholds(tmp_path, changed).get_thresholds()
+
+
+def test_unknown_activity_thresholds_are_refused(tmp_path: Path) -> None:
+    changed = {**THRESHOLDS_DICT, "surfing": {}}
+
+    with pytest.raises(ConfigError, match=r"unknown activities: \['surfing'\]"):
+        write_thresholds(tmp_path, changed).get_thresholds()

@@ -19,13 +19,31 @@ from gooddays.fetch.open_meteo import FORECAST_URL
 from gooddays.storage import USER_AGENT_ENV_VAR
 from helpers import load_fixture
 
-SPOTS_YAML = """
+THRESHOLDS_YAML = """
+thresholds:
+  hiking:
+    min_temperature_f: 45
+    max_precipitation_probability_pct: 30
+    max_precipitation_in: 0.1
+    min_run_hours: 4
+  skiing:
+    max_temperature_f: 32
+    max_wind_mph: 10
+    min_snowfall_in: 0
+    min_snow_depth_in: 0
+    min_run_hours: 4
+"""
+
+SPOTS_YAML = (
+    """
 settings:
   timezone: America/New_York
 spots:
   - {id: spot-0, name: Spot 0, lat: 40.0, lon: -75.0, activities: [hiking]}
   - {id: spot-1, name: Spot 1, lat: 41.0, lon: -75.0, activities: [skiing]}
 """
+    + THRESHOLDS_YAML
+)
 
 
 @pytest.fixture(autouse=True)
@@ -477,3 +495,186 @@ def test_runs_as_a_module() -> None:
     assert "--save-raw" in done.stdout
     assert "--fixtures" in done.stdout
     assert "Exit codes" in done.stdout
+
+
+# --- score ---
+
+
+def write_warm_dry_run(folder: Path) -> Path:
+    """A saved run of the warm, dry June 15-16 fixture, fetched early on June 15."""
+    write_saved_run(folder)
+    for spot_id in ("spot-0", "spot-1"):
+        (folder / spot_id / "open_meteo.json").write_text(
+            json.dumps(load_fixture("open_meteo_warm_dry.json"))
+        )
+    (folder / "meta.json").write_text(
+        json.dumps({"fetched_at": "2026-06-15T04:00:00-04:00"})
+    )
+    return folder
+
+
+def test_score_from_a_saved_folder_without_the_network(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+
+    assert main(["score", "--fixtures", str(folder)]) == 0
+
+    out = capsys.readouterr().out
+    assert "Spot 0 (spot-0)" in out
+    assert "  2026-06-15  hiking  GOOD" in out
+    assert "  2026-06-16  hiking  GOOD" in out
+    assert "  2026-06-15  skiing  NOT GOOD" in out  # warm, no snow
+    assert "snow: no snow overnight and none on the ground" in out
+    assert out.rstrip().endswith("2 spot(s) scored, 2 good day(s), 0 error(s)")
+
+
+def test_score_json_is_only_json_on_stdout(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+
+    assert main(["score", "--fixtures", str(folder), "--json"]) == 0
+
+    data = json.loads(capsys.readouterr().out)
+    assert [s["spot"]["id"] for s in data["scores"]] == ["spot-0", "spot-1"]
+    hiking = data["scores"][0]["scores"][0]
+    assert (hiking["activity"], hiking["day"], hiking["status"]) == (
+        "hiking",
+        "2026-06-15",
+        "good",
+    )
+    assert data["errors"] == []
+
+
+def test_score_lists_fetch_errors_and_scores_the_rest(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    (folder / "spot-1" / "open_meteo.json").unlink()  # spot-1 can't be fetched
+
+    assert main(["score", "--fixtures", str(folder)]) == 0
+
+    out = capsys.readouterr().out
+    assert "Spot 0 (spot-0)" in out
+    assert "Spot 1 (spot-1)" not in out  # no forecast, no score
+    assert "ERROR spot-1 [open_meteo] no saved response at" in out
+
+
+def test_score_when_nothing_could_be_fetched_exits_1(project: Path) -> None:
+    (project / "empty").mkdir()
+
+    assert main(["score", "--fixtures", str(project / "empty")]) == 1
+
+
+def test_score_alerts_unknown_means_not_good(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    (folder / "spot-0" / "nws.json").unlink()  # alerts can't be checked
+
+    assert main(["score", "--fixtures", str(folder)]) == 0
+
+    out = capsys.readouterr().out
+    assert "  2026-06-15  hiking  NOT GOOD" in out
+    assert "alerts: unknown" in out
+
+
+@respx.mock
+def test_score_live_fetches_then_scores(capsys: pytest.CaptureFixture[str]) -> None:
+    forecast_route, alerts_route = mock_ok()
+
+    assert main(["score"]) == 0
+
+    assert forecast_route.call_count == alerts_route.call_count == 2
+    assert "2 spot(s) scored" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ("min_run_hours: 4\n  skiing", "min_run_hours: 0\n  skiing", "min_run_hours"),
+        ("max_wind_mph: 10", "max_wind_mph: fast", "thresholds.skiing.max_wind_mph"),
+    ],
+)
+def test_score_with_bad_thresholds_exits_2_naming_the_field(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    old: str,
+    new: str,
+    message: str,
+) -> None:
+    (project / "spots.yaml").write_text(SPOTS_YAML.replace(old, new))
+
+    assert main(["score"]) == 2
+
+    assert "config error: thresholds" in capsys.readouterr().err
+
+
+def test_score_without_a_thresholds_block_exits_2(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (project / "spots.yaml").write_text(SPOTS_YAML.replace(THRESHOLDS_YAML, ""))
+
+    assert main(["score"]) == 2
+
+    assert "missing 'thresholds'" in capsys.readouterr().err
+
+
+@respx.mock
+def test_fetch_does_not_need_thresholds(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mock_ok()
+    (project / "spots.yaml").write_text(SPOTS_YAML.replace(THRESHOLDS_YAML, ""))
+
+    assert main(["fetch"]) == 0
+
+
+def test_score_has_no_save_raw_option() -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["score", "--save-raw"])
+
+    assert exc.value.code == 2
+
+
+def test_score_fixtures_must_be_a_directory(project: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["score", "--fixtures", str(project / "nope")])
+
+    assert exc.value.code == 2
+
+
+def test_score_unexpected_error_exits_70(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def explode(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cli, "score_conditions", explode)
+    folder = write_warm_dry_run(project / "saved")
+
+    assert main(["score", "--fixtures", str(folder)]) == 70
+
+
+def test_score_runs_as_a_module(project: Path) -> None:
+    folder = write_warm_dry_run(project / "saved")
+
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gooddays",
+            "score",
+            "--fixtures",
+            str(folder),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert done.returncode == 0
+    assert len(json.loads(done.stdout)["scores"]) == 2
+    assert "level=INFO" in done.stderr

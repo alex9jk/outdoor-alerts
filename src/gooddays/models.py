@@ -42,6 +42,7 @@ class HourlyConditions:
     wind_speed_mph: float | None
     wind_gust_mph: float | None
     snowfall_in: float | None
+    snow_depth_in: float | None  # snow on the ground, in inches
     weather_code: int | None  # WMO code, as returned by Open-Meteo
 
 
@@ -82,3 +83,62 @@ class SpotError:
 class FetchResult:
     results: list[SpotConditions] = field(default_factory=list)
     errors: list[SpotError] = field(default_factory=list)
+
+
+# --- Scoring: thresholds (from spots.yaml) and results ---
+
+
+@dataclass(frozen=True, slots=True)
+class HikingThresholds:
+    min_temperature_f: float  # an hour passes at or above this
+    max_precipitation_probability_pct: float  # at or below this
+    max_precipitation_in: float  # per hour, at or below this
+    min_run_hours: int  # consecutive passing daylight hours needed
+
+
+@dataclass(frozen=True, slots=True)
+class SkiingThresholds:
+    max_temperature_f: float  # an hour passes below this
+    max_wind_mph: float  # below this
+    min_snowfall_in: float  # an overnight hour counts as snowing above this
+    min_snow_depth_in: float  # snow on the ground counts above this
+    min_run_hours: int  # consecutive passing daylight hours needed
+
+
+@dataclass(frozen=True, slots=True)
+class Thresholds:
+    hiking: HikingThresholds
+    skiing: SkiingThresholds
+
+
+ScoreStatus = Literal["good", "not_good", "no_rules"]
+
+
+@dataclass(frozen=True, slots=True)
+class CheckResult:
+    name: str
+    passed: bool
+    value: str  # what was found, in words
+    limit: str  # what the check needs
+
+
+@dataclass(frozen=True, slots=True)
+class ActivityScore:
+    activity: Activity
+    day: date
+    status: ScoreStatus
+    checks: tuple[CheckResult, ...]
+    reasons: tuple[str, ...]  # one per failed check, plus things like "no data"
+    notes: tuple[str, ...]  # extra information that doesn't change the status
+
+
+@dataclass(frozen=True, slots=True)
+class SpotScore:
+    spot: Spot
+    fetched_at: datetime
+    scores: tuple[ActivityScore, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ScoreResult:
+    results: tuple[SpotScore, ...]

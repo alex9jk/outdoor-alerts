@@ -42,13 +42,14 @@ async def test_forecast_sends_expected_params(client: httpx.AsyncClient) -> None
     assert params["longitude"] == "-77.404"
     assert params["hourly"] == (
         "temperature_2m,precipitation_probability,precipitation,"
-        "wind_speed_10m,wind_gusts_10m,snowfall,weather_code"
+        "wind_speed_10m,wind_gusts_10m,snowfall,snow_depth,weather_code"
     )
     assert params["daily"] == "sunrise,sunset"
     assert params["forecast_days"] == "2"
     assert params["temperature_unit"] == "fahrenheit"
     assert params["wind_speed_unit"] == "mph"
     assert params["precipitation_unit"] == "inch"
+    assert params["length_unit"] == "imperial"
     assert params["timezone"] == "America/New_York"
     assert params["timeformat"] == "unixtime"
 

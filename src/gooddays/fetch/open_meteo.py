@@ -16,6 +16,7 @@ HOURLY_VARIABLES = (
     "wind_speed_10m",
     "wind_gusts_10m",
     "snowfall",
+    "snow_depth",
     "weather_code",
 )
 DAILY_VARIABLES = ("sunrise", "sunset")
@@ -38,6 +39,7 @@ async def fetch_forecast(
         "temperature_unit": "fahrenheit",
         "wind_speed_unit": "mph",
         "precipitation_unit": "inch",
+        "length_unit": "imperial",  # snow_depth comes back in feet
         "timezone": settings.timezone,
         # Without this, times are local labels at ONE fixed UTC offset for the whole
         # response, which is an hour off after a DST change. Unix times are exact.

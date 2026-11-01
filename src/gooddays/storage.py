@@ -4,6 +4,7 @@ The pipeline depends on the `Storage` protocol, not on YAML, so a
 DynamoDB-backed implementation can replace `LocalStorage` later.
 """
 
+import math
 import os
 from pathlib import Path
 from typing import Any, Protocol, get_args
@@ -11,7 +12,15 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
-from gooddays.models import SPOT_ID_PATTERN, Activity, Settings, Spot
+from gooddays.models import (
+    SPOT_ID_PATTERN,
+    Activity,
+    HikingThresholds,
+    Settings,
+    SkiingThresholds,
+    Spot,
+    Thresholds,
+)
 
 USER_AGENT_ENV_VAR = "GOODDAYS_NWS_USER_AGENT"
 
@@ -24,6 +33,8 @@ class Storage(Protocol):
     def get_settings(self) -> Settings: ...
 
     def get_spots(self) -> list[Spot]: ...
+
+    def get_thresholds(self) -> Thresholds: ...
 
 
 class LocalStorage:
@@ -62,6 +73,73 @@ class LocalStorage:
             seen.add(spot.id)
         return spots
 
+    def get_thresholds(self) -> Thresholds:
+        raw = self._load().get("thresholds")
+        if not isinstance(raw, dict):
+            raise ConfigError("missing 'thresholds' mapping")
+        if "biking" in raw:
+            raise ConfigError(
+                "thresholds.biking: there are no biking rules yet; remove it"
+            )
+        unknown = sorted(str(k) for k in set(raw) - {"hiking", "skiing"})
+        if unknown:
+            raise ConfigError(f"thresholds has unknown activities: {unknown}")
+
+        hiking = _threshold_block(
+            raw,
+            "hiking",
+            {
+                "min_temperature_f",
+                "max_precipitation_probability_pct",
+                "max_precipitation_in",
+                "min_run_hours",
+            },
+        )
+        skiing = _threshold_block(
+            raw,
+            "skiing",
+            {
+                "max_temperature_f",
+                "max_wind_mph",
+                "min_snowfall_in",
+                "min_snow_depth_in",
+                "min_run_hours",
+            },
+        )
+        return Thresholds(
+            hiking=HikingThresholds(
+                min_temperature_f=_threshold_number(
+                    hiking, "min_temperature_f", "thresholds.hiking"
+                ),
+                max_precipitation_probability_pct=_threshold_number(
+                    hiking,
+                    "max_precipitation_probability_pct",
+                    "thresholds.hiking",
+                    minimum=0,
+                    maximum=100,
+                ),
+                max_precipitation_in=_threshold_number(
+                    hiking, "max_precipitation_in", "thresholds.hiking", minimum=0
+                ),
+                min_run_hours=_run_hours(hiking, "thresholds.hiking"),
+            ),
+            skiing=SkiingThresholds(
+                max_temperature_f=_threshold_number(
+                    skiing, "max_temperature_f", "thresholds.skiing"
+                ),
+                max_wind_mph=_threshold_number(
+                    skiing, "max_wind_mph", "thresholds.skiing", minimum=0
+                ),
+                min_snowfall_in=_threshold_number(
+                    skiing, "min_snowfall_in", "thresholds.skiing", minimum=0
+                ),
+                min_snow_depth_in=_threshold_number(
+                    skiing, "min_snow_depth_in", "thresholds.skiing", minimum=0
+                ),
+                min_run_hours=_run_hours(skiing, "thresholds.skiing"),
+            ),
+        )
+
     def _load(self) -> dict[str, Any]:
         try:
             data = yaml.safe_load(self._path.read_text(encoding="utf-8"))
@@ -74,6 +152,44 @@ class LocalStorage:
         if not isinstance(data, dict):
             raise ConfigError(f"{self._path} must contain a mapping at the top level")
         return data
+
+
+def _threshold_block(
+    raw: dict[str, Any], activity: str, keys: set[str]
+) -> dict[str, Any]:
+    where = f"thresholds.{activity}"
+    block = raw.get(activity)
+    if not isinstance(block, dict):
+        raise ConfigError(f"missing '{where}' mapping")
+    unknown = sorted(str(k) for k in set(block) - keys)
+    if unknown:
+        raise ConfigError(f"{where} has unknown key(s): {unknown}")
+    return block
+
+
+def _threshold_number(
+    block: dict[str, Any],
+    key: str,
+    where: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float:
+    value = _require_number(block, key, where)
+    if not math.isfinite(value):
+        raise ConfigError(f"{where}.{key} must be a finite number")
+    if minimum is not None and value < minimum:
+        raise ConfigError(f"{where}.{key} must be at least {minimum:g}")
+    if maximum is not None and value > maximum:
+        raise ConfigError(f"{where}.{key} must be at most {maximum:g}")
+    return value
+
+
+def _run_hours(block: dict[str, Any], where: str) -> int:
+    value = block.get("min_run_hours")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ConfigError(f"{where}.min_run_hours must be a whole number of at least 1")
+    return value
 
 
 def _parse_timezone(name: str) -> str:
