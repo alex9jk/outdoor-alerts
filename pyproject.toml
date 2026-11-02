@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Is it a good day? Checks weather for favorite outdoor spots."
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "anthropic>=2.4.0,<3",
     "httpx",
     "pyyaml",
 ]

@@ -169,7 +169,7 @@ def _score_daylight_run(
     min_run_hours: int,
 ) -> ActivityScore:
     """Score an activity that only needs good daylight hours (no overnight check)."""
-    window = _daylight(conditions, day, tz)
+    window = daylight_window(conditions, day, tz)
     checks: list[CheckResult] = []
     early: list[str] = []
     if window is None:
@@ -188,7 +188,7 @@ def _score_daylight_run(
 def _score_downhill_skiing(
     conditions: SpotConditions, day: date, t: DownhillSkiingThresholds, tz: ZoneInfo
 ) -> ActivityScore:
-    window = _daylight(conditions, day, tz)
+    window = daylight_window(conditions, day, tz)
     rules = [
         _Rule(
             "temperature_f",
@@ -207,7 +207,7 @@ def _score_downhill_skiing(
     early: list[str] = []
     # The night leading into the day: from the previous sunset up to this day's
     # sunrise. Today has no earlier day in the data, so it starts at the first row.
-    previous = _daylight(conditions, day - timedelta(days=1), tz)
+    previous = daylight_window(conditions, day - timedelta(days=1), tz)
     is_today = day == conditions.fetched_at.astimezone(tz).date()
     if window is None:
         early.append(NO_WINDOW_REASON)
@@ -253,7 +253,7 @@ def _finish(
     )
 
 
-def _daylight(
+def daylight_window(
     conditions: SpotConditions, day: date, tz: ZoneInfo
 ) -> DaylightWindow | None:
     # Match on the sunrise's own local date, not DaylightWindow.date, which is a
@@ -262,6 +262,20 @@ def _daylight(
         if window.sunrise.astimezone(tz).date() == day:
             return window
     return None
+
+
+def hours_between(
+    conditions: SpotConditions, start: datetime, end: datetime
+) -> list[HourlyConditions]:
+    """The hourly rows from `start` up to (not including) `end`."""
+    return [h for h in conditions.hourly if _utc(start) <= _utc(h.time) < _utc(end)]
+
+
+def not_yet_past(
+    conditions: SpotConditions, hours: list[HourlyConditions]
+) -> list[HourlyConditions]:
+    """Drop hours already over at the fetch time (the hour containing it stays)."""
+    return [h for h in hours if _utc(h.time) + HOUR > _utc(conditions.fetched_at)]
 
 
 def _midnight(day: date, tz: ZoneInfo) -> datetime:
@@ -279,16 +293,13 @@ def _hourly_checks(
     rules: list[_Rule],
     min_run_hours: int,
 ) -> list[CheckResult]:
-    in_window = [
-        h for h in conditions.hourly if _utc(start) <= _utc(h.time) < _utc(end)
-    ]
+    in_window = hours_between(conditions, start, end)
     if not in_window:
         return [
             CheckResult("hourly_data", False, "no data", "hourly rows in the window")
         ]
 
-    # The hour that contains the fetch time still counts; earlier ones are over.
-    usable = [h for h in in_window if _utc(h.time) + HOUR > _utc(conditions.fetched_at)]
+    usable = not_yet_past(conditions, in_window)
     if len(usable) < min_run_hours and len(usable) < len(in_window):
         return [
             CheckResult(

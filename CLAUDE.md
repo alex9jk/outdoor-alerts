@@ -7,8 +7,8 @@ outdoor spots (hiking, biking, downhill and cross-country skiing) and alerts me 
 The pipeline has four stages:
 `fetch_conditions` → `score_conditions` → `generate_message` → `send_notification`
 
-**`fetch_conditions` is built. Current focus: `score_conditions`.** Do not build
-`generate_message` or `send_notification` yet.
+**`fetch_conditions` and `score_conditions` are built. Current focus:
+`generate_message`.** Do not build `send_notification` yet.
 
 Everything runs locally as a plain Python package first. AWS (Lambda, Step Functions,
 DynamoDB) comes later, so keep the code free of AWS dependencies for now.
@@ -16,6 +16,9 @@ DynamoDB) comes later, so keep the code free of AWS dependencies for now.
 ## Tech and conventions
 - Python 3.12, managed with `uv`
 - HTTP client: `httpx` with explicit timeouts (no `requests`)
+- Claude API: the official `anthropic` SDK, used only in `ai_writer.py`, with the
+  `ANTHROPIC_API_KEY` environment variable (never committed or logged). It brings its own
+  HTTP library (`httpx2`), so `respx` cannot mock it: tests use a fake `MessageWriter`.
 - Data models: `dataclasses` or `pydantic`, fully type-hinted
 - Lint/format: `ruff`; type check: `mypy --strict` on `src/`
 - Tests: `pytest`, with mocked HTTP (`respx`) — tests never hit the network
@@ -25,16 +28,19 @@ DynamoDB) comes later, so keep the code free of AWS dependencies for now.
 ## Layout
 ```
 src/gooddays/
-  models.py        # Spot, HourlyConditions, Alert, SpotConditions, Thresholds, ScoreResult
+  models.py        # Spot, HourlyConditions, Alert, SpotConditions, Thresholds, ScoreResult,
+                   # GoodEntry, MessageFacts, Message
   storage.py       # Storage protocol + LocalStorage (reads spots.yaml)
   score.py         # score_conditions(): pass/fail per spot, activity and day
+  message.py       # generate_message(): one SMS digest of the good days (pure parts)
+  ai_writer.py     # the Claude writer behind generate_message (the only SDK user)
   fetch/
     open_meteo.py  # forecast client
     nws.py         # alerts client
     service.py     # fetch_conditions(): orchestrates per spot
     raw.py         # --save-raw snapshots and --fixtures replay fetchers
   report.py        # text and JSON rendering of fetch and score results
-  cli.py           # `python -m gooddays fetch` and `python -m gooddays score`
+  cli.py           # `python -m gooddays fetch`, `score` and `message`
 tests/
   fixtures/        # saved raw API responses (JSON)
 spots.yaml
@@ -93,14 +99,53 @@ only printed; nothing is stored or sent.
 - The old activity name `skiing` was renamed to `downhill_skiing`; `skiing` in config is a
   ConfigError that says so.
 
+## What generate_message does
+Turns the good days into ONE short SMS text (plain ASCII, body only, no subject), or into
+nothing when there is nothing worth sending. Only printed for now; `send_notification`
+(recipients, channel, sending) is a later stage.
+
+- **Code decides what is mentioned**: only `good` entries for today and tomorrow, ordered by
+  day, then spots in config order, then each spot's own activity order. Never the AI. Spots
+  with unknown alerts are never good. No good days means no message and no AI call
+  (`message` prints `nothing to send`).
+- **Each entry** shows spot, activity, weekday and date with today/tomorrow, temperature
+  range, maximum wind, daylight window, snow depth (skiing activities only, and only when it
+  rounds to at least 1 in) and any minor alerts. Temperature and wind use the hours the
+  scorer judged (daylight, minus hours already over); snow depth uses the whole daylight
+  window, like the scorer. A short footer counts spots with any fetch error ("2 spots
+  couldn't be checked"); code appends it. Names are cleaned to plain SMS text (ASCII only,
+  none of `^{}\[]~|` or the backtick); a name with nothing left uses the spot id.
+- **Claude writes the wording** from those facts (`claude-opus-5-5`, effort low, 30s
+  timeout, the SDK's 2 retries, so a bad day can take up to about 90s before the fallback;
+  the server-side refusal fallback is on). The facts go in as data; alert text is never
+  treated as instructions.
+- **Validation** (`validate_text`): plain SMS-safe ASCII, at most 306 characters (two
+  multi-part SMS segments of 153; the footer counts), every entry named in its own
+  "Today"/"Tomorrow" group with its activity (so a dropped entry is caught even when the spot
+  appears elsewhere), no unknown spot, and no number that is not in the facts (a minus sign
+  counts). Known limits: a real number attached to the wrong fact passes (a wind speed that is
+  really a temperature), a place name that is not in the config is not caught, and alert
+  notes are optional in the text.
+- **Fallback**: any AI failure (no key, network, rate limit, refusal, truncated, empty or
+  non-text reply, an unexpected exception) or failed validation uses a code-built text, and
+  logs `message_fallback reason=...` at WARNING (INFO for `--no-ai`; an unexpected exception
+  includes its traceback). Reasons never contain the key, the prompt, or names or numbers from
+  the facts. If there are too many entries to list even in the shortest form, the AI is not
+  called at all. A too-long fallback drops alert notes, then daylight, then snow depth, then
+  entries ("+N more", always keeping at least one entry and the footer). Never split into
+  several texts. A cap below 80 characters is refused.
+- Moving to Amazon Bedrock later means changing `build_client`, `MODEL` and the fallback
+  setting in `ai_writer.py` (the SDK has a Bedrock client); nothing else.
+
 ## Rules
 - **No scoring or judgment in the fetch stage.** This stage only fetches and normalizes.
   "Is it good?" belongs in `score_conditions`.
 - **One bad spot never fails the run.** Catch per-spot errors, record them in
   `errors`, and keep going.
 - Retries: up to 3 attempts with exponential backoff on timeouts and 5xx only.
-  Never retry 4xx.
-- Timeouts: 10s per request.
+  Never retry 4xx. (The Claude SDK call in `ai_writer.py` is the one exception: it uses
+  the SDK's own retries, which also cover 408, 409 and 429.)
+- Timeouts: 10s per request. (Except the Claude call, which gets 30s because Opus thinks first.)
 - Fetch spots concurrently (async `httpx`), but cap concurrency at 5.
 - Keep API clients thin: they return parsed raw responses. Normalization
   happens in `service.py`, so it can be tested from fixtures alone.
@@ -126,6 +171,10 @@ only printed; nothing is stored or sent.
   (fetches, then scores; same exit codes as fetch, and a day that isn't good is output,
   not an error). Thresholds are in `spots.yaml` under `thresholds:` and are all required
   (`min_run_hours` is a whole number from 1 to 24).
+- Message: `uv run python -m gooddays message [--spots PATH] [--fixtures DIR] [--no-ai]`
+  (fetches, scores, then prints one SMS text or `nothing to send`; needs `ANTHROPIC_API_KEY`
+  unless `--no-ai`, and falls back to the code-built text if Claude can't be used; exit codes
+  as for score).
 - Test: `uv run pytest`
 - Lint/types: `uv run ruff check . && uv run mypy src`
 
