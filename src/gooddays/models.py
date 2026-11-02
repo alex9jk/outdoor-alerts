@@ -101,7 +101,7 @@ class HikingThresholds:
 class DownhillSkiingThresholds:
     max_temperature_f: float  # an hour passes below this
     max_wind_mph: float  # below this
-    min_snowfall_in: float  # an overnight hour counts as snowing above this
+    min_snowfall_in: float  # total overnight snowfall counts as snow above this
     min_snow_depth_in: float  # snow on the ground counts above this
     min_run_hours: int  # consecutive passing daylight hours needed
 

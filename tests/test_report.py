@@ -15,7 +15,13 @@ from gooddays.models import (
     SpotError,
     SpotScore,
 )
-from gooddays.report import score_to_json, score_to_text, to_json, to_text
+from gooddays.report import (
+    ACTIVITY_WIDTH,
+    score_to_json,
+    score_to_text,
+    to_json,
+    to_text,
+)
 from helpers import load_fixture
 
 SPOT = Spot(
@@ -293,3 +299,7 @@ def test_score_text_columns_line_up_for_the_longest_activity_name() -> None:
 
     assert short.index("GOOD") == long.index("GOOD")
     assert "cross_country_skiing GOOD" in long
+
+
+def test_activity_column_fits_the_longest_activity_name() -> None:
+    assert ACTIVITY_WIDTH == len("cross_country_skiing")

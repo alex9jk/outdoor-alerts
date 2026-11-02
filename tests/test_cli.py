@@ -603,17 +603,19 @@ def test_score_live_fetches_then_scores(capsys: pytest.CaptureFixture[str]) -> N
 
 
 @pytest.mark.parametrize(
-    ("old", "new", "message"),
+    ("old", "new", "field"),
     [
+        # The first min_run_hours in the file is hiking's.
+        ("min_run_hours: 4", "min_run_hours: 0", "thresholds.hiking.min_run_hours"),
         (
-            "min_run_hours: 4\n  downhill_skiing",
-            "min_run_hours: 0\n  skiing",
-            "min_run_hours",
+            "  downhill_skiing:\n    max_temperature_f: 32\n    max_wind_mph: 10",
+            "  downhill_skiing:\n    max_temperature_f: 32\n    max_wind_mph: fast",
+            "thresholds.downhill_skiing.max_wind_mph",
         ),
         (
-            "max_wind_mph: 10",
-            "max_wind_mph: fast",
-            "thresholds.downhill_skiing.max_wind_mph",
+            "max_rain_in: 0",
+            "max_rain_in: -1",
+            "thresholds.cross_country_skiing.max_rain_in",
         ),
     ],
 )
@@ -622,13 +624,28 @@ def test_score_with_bad_thresholds_exits_2_naming_the_field(
     capsys: pytest.CaptureFixture[str],
     old: str,
     new: str,
-    message: str,
+    field: str,
 ) -> None:
-    (project / "spots.yaml").write_text(SPOTS_YAML.replace(old, new))
+    text = SPOTS_YAML.replace(old, new, 1)
+    assert text != SPOTS_YAML  # the edit really changed something
+    (project / "spots.yaml").write_text(text)
 
     assert main(["score"]) == 2
 
-    assert "config error: thresholds" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert err.startswith(f"config error: {field} ")
+
+
+@respx.mock
+def test_score_checks_thresholds_before_fetching(project: Path) -> None:
+    forecast_route, alerts_route = mock_ok()
+    (project / "spots.yaml").write_text(
+        SPOTS_YAML.replace("max_rain_in: 0", "max_rain_in: -1")
+    )
+
+    assert main(["score"]) == 2
+
+    assert forecast_route.call_count == alerts_route.call_count == 0
 
 
 def test_score_without_a_thresholds_block_exits_2(
@@ -805,3 +822,20 @@ def test_a_temperature_window_with_no_room_exits_2(
     assert "must be below thresholds.cross_country_skiing.max_temperature_f" in (
         capsys.readouterr().err
     )
+
+
+def test_replaying_a_folder_saved_before_rain_and_snow_depth_existed(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (project / "spots.yaml").write_text(CROSS_COUNTRY_SPOTS_YAML)
+    folder = xc_saved_run(project / "saved")
+    path = folder / "spot-x" / "open_meteo.json"
+    data = json.loads(path.read_text())
+    del data["hourly"]["rain"], data["hourly"]["snow_depth"]
+    path.write_text(json.dumps(data))
+
+    assert main(["score", "--fixtures", str(folder)]) == 0
+
+    out = capsys.readouterr().out
+    assert row("2026-06-15", "cross_country_skiing", "NOT GOOD") in out
+    assert "snow_depth_in:" in out and "no values for this reading in the data" in out

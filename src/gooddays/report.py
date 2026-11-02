@@ -9,9 +9,10 @@ import json
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, tzinfo
-from typing import Any
+from typing import Any, get_args
 
 from gooddays.models import (
+    Activity,
     Alert,
     DaylightWindow,
     FetchResult,
@@ -21,8 +22,7 @@ from gooddays.models import (
     SpotError,
 )
 
-# Wide enough for the longest activity name (cross_country_skiing).
-ACTIVITY_WIDTH = 20
+ACTIVITY_WIDTH = max(len(activity) for activity in get_args(Activity))
 
 
 def to_json(result: FetchResult) -> str:

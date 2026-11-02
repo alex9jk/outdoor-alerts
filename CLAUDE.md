@@ -76,15 +76,17 @@ only printed; nothing is stored or sent.
     wind < max, rain probability <= max, and liquid rain (`rain`) <= max per hour (0 means any
     rain fails), in daylight hours. Fresh snow overnight is NOT required, and snow depth is an
     hourly rule. The config requires min temperature to be below max temperature.
-- **Downhill snow is required**: overnight snowfall > `min_snowfall_in` (overnight = from the
-  previous sunset, or the start of the data for today, to sunrise) OR snow depth on the
-  ground > `min_snow_depth_in`. Weather codes don't count. (Open-Meteo's depth is modeled
+- **Downhill snow is required**: the *total* overnight snowfall > `min_snowfall_in`
+  (overnight = from the previous sunset, or the start of the data for today, to sunrise;
+  if the previous day's sunset isn't in the data the day is "no data") OR snow depth on
+  the ground > `min_snow_depth_in`. Weather codes don't count. (Open-Meteo's depth is modeled
   natural snow, not a resort's reported base.)
 - **Alerts**: unknown alerts (`alerts=None`) never pass. Severe and Extreme alerts that
   are still active fail every activity; other severities are listed as notes. An alert
   that ends at or before the window start is over. The alert window starts at sunrise,
   except downhill skiing, where it starts overnight.
-- **Missing data** never passes: a missing value fails its check, a day with no daylight
+- **Missing data** never passes: a missing value fails its check (a reading missing for
+  every hour, e.g. in an older saved response, is reported as "no values for this reading"), a day with no daylight
   window or no hourly rows is "no data", and today only counts the hours from the fetch time.
 - Compare times through UTC: same-zone datetimes compare by wall clock, wrong across DST.
 
@@ -122,7 +124,8 @@ only printed; nothing is stored or sent.
   folder only when the run completes, so a saved folder is never a mix of two runs.
 - Score: `uv run python -m gooddays score [--spots PATH] [--json] [--fixtures DIR]`
   (fetches, then scores; same exit codes as fetch, and a day that isn't good is output,
-  not an error). Thresholds are in `spots.yaml` under `thresholds:` and are all required.
+  not an error). Thresholds are in `spots.yaml` under `thresholds:` and are all required
+  (`min_run_hours` is a whole number from 1 to 24).
 - Test: `uv run pytest`
 - Lint/types: `uv run ruff check . && uv run mypy src`
 

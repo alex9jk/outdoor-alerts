@@ -76,10 +76,12 @@ class LocalStorage:
 
     def get_thresholds(self) -> Thresholds:
         raw = self._load().get("thresholds")
-        if not isinstance(raw, dict):
+        if raw is None:
             raise ConfigError("missing 'thresholds' mapping")
+        if not isinstance(raw, dict):
+            raise ConfigError("'thresholds' must be a mapping of activities")
         if "skiing" in raw:
-            raise ConfigError(_SKIING_RENAMED.replace("{where}", "thresholds"))
+            raise ConfigError(_skiing_renamed("thresholds"))
         if "biking" in raw:
             raise ConfigError(
                 "thresholds.biking: there are no biking rules yet; remove it"
@@ -157,9 +159,12 @@ _THRESHOLD_KEYS: dict[str, set[str]] = {
     },
 }
 
-_SKIING_RENAMED = (
-    "{where}: 'skiing' was renamed; use 'downhill_skiing' or 'cross_country_skiing'"
-)
+
+def _skiing_renamed(where: str) -> str:
+    return (
+        f"{where}: 'skiing' was renamed; "
+        "use 'downhill_skiing' or 'cross_country_skiing'"
+    )
 
 
 def _downhill(block: dict[str, Any]) -> DownhillSkiingThresholds:
@@ -204,8 +209,10 @@ def _threshold_block(
 ) -> dict[str, Any]:
     where = f"thresholds.{activity}"
     block = raw.get(activity)
-    if not isinstance(block, dict):
+    if block is None:
         raise ConfigError(f"missing '{where}' mapping")
+    if not isinstance(block, dict):
+        raise ConfigError(f"'{where}' must be a mapping of limits")
     unknown = sorted(str(k) for k in set(block) - keys)
     if unknown:
         raise ConfigError(f"{where} has unknown key(s): {unknown}")
@@ -232,8 +239,8 @@ def _threshold_number(
 
 def _run_hours(block: dict[str, Any], where: str) -> int:
     value = block.get("min_run_hours")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ConfigError(f"{where}.min_run_hours must be a whole number of at least 1")
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 24:
+        raise ConfigError(f"{where}.min_run_hours must be a whole number from 1 to 24")
     return value
 
 
@@ -261,7 +268,7 @@ def _parse_spot(index: int, item: object) -> Spot:
 
     activities = item.get("activities")
     if isinstance(activities, list) and "skiing" in activities:
-        raise ConfigError(_SKIING_RENAMED.replace("{where}", f"{where}.activities"))
+        raise ConfigError(_skiing_renamed(f"{where}.activities"))
     valid = get_args(Activity)
     if (
         not isinstance(activities, list)

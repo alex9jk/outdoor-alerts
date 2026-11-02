@@ -271,16 +271,17 @@ def test_repo_spots_yaml_thresholds_are_valid() -> None:
     ("thresholds", "message"),
     [
         (None, "missing 'thresholds'"),
-        ("hiking", "missing 'thresholds'"),
+        ("hiking", "'thresholds' must be a mapping"),
+        (["hiking"], "'thresholds' must be a mapping"),
         (with_change(["hiking"], ...), "missing 'thresholds.hiking'"),
         (with_change(["downhill_skiing"], ...), "missing 'thresholds.downhill_skiing'"),
         (
             with_change(["hiking", "min_temperature_f"], ...),
-            "hiking.min_temperature_f must be a number",
+            "thresholds.hiking.min_temperature_f must be a number",
         ),
         (
             with_change(["downhill_skiing", "max_wind_mph"], ...),
-            "skiing.max_wind_mph must be a number",
+            "thresholds.downhill_skiing.max_wind_mph must be a number",
         ),
         (
             with_change(["downhill_skiing", "min_snow_depth_in"], ...),
@@ -495,3 +496,35 @@ def test_repo_spots_yaml_activities() -> None:
     assert spots["harriet-hollister-park"] == ("hiking", "cross_country_skiing")
     assert spots["bristol-mountain"] == ("downhill_skiing",)
     assert all("skiing" not in activities for activities in spots.values())
+
+
+@pytest.mark.parametrize("hours", [25, 100])
+def test_min_run_hours_has_an_upper_bound(tmp_path: Path, hours: int) -> None:
+    changed = with_change(["hiking", "min_run_hours"], hours)
+
+    with pytest.raises(
+        ConfigError, match="min_run_hours must be a whole number from 1 to 24"
+    ):
+        write_thresholds(tmp_path, changed).get_thresholds()
+
+
+def test_min_run_hours_accepts_the_limits(tmp_path: Path) -> None:
+    changed = with_change(["hiking", "min_run_hours"], 24)
+    changed["downhill_skiing"]["min_run_hours"] = 1
+
+    thresholds = write_thresholds(tmp_path, changed).get_thresholds()
+
+    assert (
+        thresholds.hiking.min_run_hours,
+        thresholds.downhill_skiing.min_run_hours,
+    ) == (24, 1)
+
+
+@pytest.mark.parametrize(
+    "activity", ["hiking", "downhill_skiing", "cross_country_skiing"]
+)
+def test_an_activity_block_that_is_not_a_mapping(tmp_path: Path, activity: str) -> None:
+    changed = {**THRESHOLDS_DICT, activity: "warm"}
+
+    with pytest.raises(ConfigError, match=f"'thresholds.{activity}' must be a mapping"):
+        write_thresholds(tmp_path, changed).get_thresholds()

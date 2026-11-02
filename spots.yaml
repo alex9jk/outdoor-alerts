@@ -59,7 +59,7 @@ spots:
     lon: -72.7183
     activities: [downhill_skiing]
 
-  - id: mendon-ponds-park 
+  - id: mendon-ponds-park
     name: Mendon Ponds Park
     lat: 42.998952
     lon: -77.5638868
@@ -72,7 +72,7 @@ spots:
     activities: [hiking, cross_country_skiing]
 
   - id: boughton-park
-    name: Boughton. Park
+    name: Boughton Park
     lat: 42.93471
     lon: -77.43973
     activities: [hiking]

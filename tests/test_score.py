@@ -72,13 +72,13 @@ def at(day: date, hour: int, minute: int = 0) -> datetime:
     return datetime(day.year, day.month, day.day, hour, minute, tzinfo=ET)
 
 
-def make_spot(*activities: str) -> Spot:
+def make_spot(*activities: Any) -> Spot:
     return Spot(
         id="spot-0",
         name="Spot 0",
         lat=40.0,
         lon=-75.0,
-        activities=activities,  # type: ignore[arg-type]
+        activities=tuple(activities),
     )
 
 
@@ -249,7 +249,7 @@ def test_a_failing_check_shows_value_and_limit() -> None:
     (check,) = [c for c in result.checks if c.name == "temperature_f"]
     assert check.limit == ">= 45 F"
     assert "0/10 hours pass" in check.value
-    assert "first fail 07:00: 41" in check.value
+    assert "first fail 07:00 -0500: 41" in check.value
 
 
 @pytest.mark.parametrize(
@@ -285,14 +285,36 @@ def test_the_required_run_length_comes_from_the_thresholds() -> None:
 # --- missing data ---
 
 
-def test_a_missing_value_does_not_pass() -> None:
+def test_a_series_that_is_entirely_missing_is_called_out() -> None:
     edits = day_edits(TODAY, DAYLIGHT, temperature_f=None)
 
     result = score(build(edits=edits), "hiking")
 
     assert result.status == "not_good"
     (check,) = [c for c in result.checks if c.name == "temperature_f"]
-    assert "first fail 07:00: missing" in check.value
+    assert not check.passed
+    assert "no values for this reading in the data" in check.value
+    assert "first fail" not in check.value
+
+
+def test_a_value_missing_in_some_hours_names_the_first_one() -> None:
+    edits = day_edits(TODAY, DAYLIGHT, temperature_f=30.0)
+    edits[(TODAY, 8)] = {"temperature_f": None}
+
+    result = score(build(edits=edits), "hiking")
+
+    (check,) = [c for c in result.checks if c.name == "temperature_f"]
+    assert "first fail 07:00 -0500: 30" in check.value  # the first failing hour
+
+
+def test_a_missing_value_does_not_pass() -> None:
+    edits = day_edits(TODAY, DAYLIGHT, temperature_f=60.0)
+    edits.update(day_edits(TODAY, range(10, 13), temperature_f=None))  # 3 + gap + 4
+
+    result = score(build(edits=edits), "hiking")
+
+    (check,) = [c for c in result.checks if c.name == "temperature_f"]
+    assert "first fail 10:00 -0500: missing" in check.value
 
 
 def test_one_missing_hour_breaks_a_run() -> None:
@@ -873,7 +895,7 @@ def test_cross_country_missing_values_do_not_pass(field: str) -> None:
     assert result.status == "not_good"
     (check,) = [c for c in result.checks if c.name == field]
     assert not check.passed
-    assert "first fail 07:00: missing" in check.value
+    assert "no values for this reading in the data" in check.value
 
 
 def test_a_midday_thaw_breaks_the_run() -> None:
@@ -971,3 +993,134 @@ def test_cross_country_and_downhill_can_disagree_on_the_same_snow() -> None:
 
     assert score(conditions, "downhill_skiing").status == "good"
     assert score(conditions, XC).status == "not_good"
+
+
+# --- review follow-ups ---
+
+
+def downhill_with_snow(hours: dict[int, float], **thresholds: Any) -> ActivityScore:
+    """A cold, calm downhill day with `hours` of overnight snowfall (inches)."""
+    edits = day_edits(TODAY, DAYLIGHT, **COLD_CALM_HOUR)
+    edits.update({(TODAY, h): {"snowfall_in": v} for h, v in hours.items()})
+    stricter = dataclasses.replace(
+        THRESHOLDS,
+        downhill_skiing=dataclasses.replace(THRESHOLDS.downhill_skiing, **thresholds),
+    )
+    return score(build(edits=edits), "downhill_skiing", thresholds=stricter)
+
+
+def test_downhill_snow_is_the_total_overnight_snowfall() -> None:
+    six_light_hours = {h: 0.3 for h in range(1, 7)}  # 1.8 in in total
+
+    # No single hour reaches 0.5, but the night's total does.
+    result = downhill_with_snow(six_light_hours, min_snowfall_in=0.5)
+
+    assert result.status == "good"
+    (snow,) = [c for c in result.checks if c.name == "snow"]
+    assert snow.value == "overnight snowfall 1.80 in"
+    assert snow.limit == "overnight snowfall total > 0.5 in, or snow depth > 0 in"
+
+
+def test_downhill_total_snowfall_must_be_strictly_above_the_minimum() -> None:
+    assert (
+        downhill_with_snow({1: 0.25, 2: 0.25}, min_snowfall_in=0.5).status == "not_good"
+    )
+    assert downhill_with_snow({1: 0.25, 2: 0.26}, min_snowfall_in=0.5).status == "good"
+
+
+def test_downhill_snow_outside_the_overnight_window_is_not_added_to_the_total() -> None:
+    # 0.3 in overnight and 0.3 in at noon (daytime): only 0.3 counts.
+    result = downhill_with_snow({1: 0.3, 12: 0.3}, min_snowfall_in=0.5)
+
+    assert result.status == "not_good"
+
+
+def test_an_unhandled_activity_fails_loudly_instead_of_silently() -> None:
+    conditions = dataclasses.replace(build(), spot=make_spot("surfing"))
+
+    with pytest.raises(AssertionError):
+        score_conditions([conditions], THRESHOLDS, TZ)
+
+
+def test_downhill_without_the_previous_sunset_is_no_data_for_tomorrow() -> None:
+    edits = {**ski_day(TOMORROW), (TODAY, 3): {"snowfall_in": 0.4}}
+    conditions = build(edits=edits)
+    tomorrow_only = tuple(w for w in conditions.daylight if w.date == TOMORROW)
+
+    result = score(
+        dataclasses.replace(conditions, daylight=tomorrow_only),
+        "downhill_skiing",
+        TOMORROW,
+    )
+
+    assert result.status == "not_good"
+    assert "no data: no previous sunset to start the overnight window" in result.reasons
+    assert "snow" not in {c.name for c in result.checks}  # not judged at all
+
+
+def test_today_may_start_its_overnight_window_at_the_first_row() -> None:
+    # Same data: today has no previous day in the data and that is fine.
+    conditions = build(edits=ski_day())
+    today_only = tuple(w for w in conditions.daylight if w.date == TODAY)
+
+    result = score(
+        dataclasses.replace(conditions, daylight=today_only), "downhill_skiing", TODAY
+    )
+
+    assert result.status == "good"
+
+
+def test_a_severe_alert_alongside_a_minor_one() -> None:
+    alerts = (alert("Minor", event="Wind Advisory"), alert("Severe", event="Blizzard"))
+
+    result = score(build(alerts=alerts), "hiking")
+
+    assert result.status == "not_good"
+    (check,) = [c for c in result.checks if c.name == "alerts"]
+    assert check.value == "Blizzard (Severe)"  # only the severe one fails the day
+    assert result.notes == ("alert: Wind Advisory (Minor)",)
+
+
+def test_a_daylight_window_shorter_than_the_required_run() -> None:
+    conditions = build()
+    short = DaylightWindow(TODAY, at(TODAY, 7), at(TODAY, 10))  # 07:00, 08:00, 09:00
+    conditions = dataclasses.replace(
+        conditions, daylight=(short, *conditions.daylight[1:])
+    )
+
+    result = score(conditions, "hiking")
+
+    # Nothing was trimmed (we fetched at the start of the day), so this is not
+    # "hours left": every check just never gets a run of 4 hours.
+    assert "hours_left" not in failed(result)
+    assert "usable_run" in failed(result)
+    (run,) = [c for c in result.checks if c.name == "usable_run"]
+    assert run.value == "longest passing run 3 h of 3 usable h"
+
+
+def test_a_spring_forward_day_keeps_the_run_across_the_missing_hour() -> None:
+    # 2026-03-08: 01:00 EST (06:00Z), then 03:00 EDT (07:00Z). A window from
+    # 00:30 EST to 05:30 EDT holds four rows. By wall clock 01:00 -> 03:00 would
+    # look like a 2-hour gap and break the run.
+    day = date(2026, 3, 8)
+    rows = [datetime(2026, 3, 8, h, tzinfo=UTC).astimezone(ET) for h in (6, 7, 8, 9)]
+    hourly = tuple(HourlyConditions(time=t, **GOOD_HOUR) for t in rows)
+    window = DaylightWindow(
+        day,
+        datetime(2026, 3, 8, 5, 30, tzinfo=UTC).astimezone(ET),
+        datetime(2026, 3, 8, 9, 30, tzinfo=UTC).astimezone(ET),
+    )
+    conditions = SpotConditions(
+        spot=make_spot("hiking"),
+        fetched_at=datetime(2026, 3, 8, 5, 0, tzinfo=UTC),
+        hourly=hourly,
+        daylight=(window,),
+        alerts=(),
+    )
+
+    result = score(conditions, "hiking", day)
+
+    assert [h.time.hour for h in hourly] == [1, 3, 4, 5]
+    assert result.status == "good"
+    (run,) = [c for c in result.checks if c.name == "usable_run"]
+    assert run.value == "longest passing run 4 h of 4 usable h"

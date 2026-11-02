@@ -1,4 +1,4 @@
-"""Command line entry point: `python -m gooddays fetch`."""
+"""Command line entry point: `fetch` and `score` for `python -m gooddays`."""
 
 import argparse
 import asyncio
@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from gooddays.fetch.raw import RawSnapshot, read_fetch_time, replay_fetchers
 from gooddays.fetch.service import Fetchers, fetch_conditions
-from gooddays.models import Settings, Spot, Thresholds
+from gooddays.models import Settings, Spot
 from gooddays.report import score_to_json, score_to_text, to_json, to_text
 from gooddays.score import score_conditions
 from gooddays.storage import ConfigError, LocalStorage
@@ -127,13 +127,12 @@ def _run(argv: Sequence[str] | None) -> int:
         storage = LocalStorage(args.spots)
         settings = storage.get_settings()
         spots = storage.get_spots()
-        thresholds = storage.get_thresholds() if args.command == "score" else None
     except ConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return EXIT_USAGE_OR_CONFIG
 
-    if thresholds is not None:
-        return _score(args, settings, spots, thresholds)
+    if args.command == "score":
+        return _score(args, settings, spots, storage)
     return _fetch(args, settings, spots)
 
 
@@ -141,8 +140,13 @@ def _score(
     args: argparse.Namespace,
     settings: Settings,
     spots: list[Spot],
-    thresholds: Thresholds,
+    storage: LocalStorage,
 ) -> int:
+    try:
+        thresholds = storage.get_thresholds()  # checked before anything is fetched
+    except ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return EXIT_USAGE_OR_CONFIG
     fetchers, fetched_at = _replay(args.fixtures)
     result = asyncio.run(
         fetch_conditions(spots, settings, fetchers=fetchers, fetched_at=fetched_at)

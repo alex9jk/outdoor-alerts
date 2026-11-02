@@ -12,6 +12,7 @@ change.
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from typing import assert_never
 from zoneinfo import ZoneInfo
 
 from gooddays.models import (
@@ -32,6 +33,7 @@ from gooddays.models import (
 
 DAYS_SCORED = 2  # today and tomorrow
 HOUR = timedelta(hours=1)
+NO_WINDOW_REASON = "no data: no daylight window"
 SEVERE_SEVERITIES = frozenset({"severe", "extreme"})
 ALERT_LIMIT = "known, with no Severe or Extreme alert"
 
@@ -78,10 +80,12 @@ def _score_spot(
                         conditions, day, thresholds.cross_country_skiing, tz
                     )
                 )
-            else:
+            elif activity == "biking":
                 scores.append(
                     ActivityScore(activity, day, "no_rules", (), (), ("no rules yet",))
                 )
+            else:
+                assert_never(activity)  # a new Activity needs a branch above
     return SpotScore(conditions.spot, conditions.fetched_at, tuple(scores))
 
 
@@ -169,8 +173,8 @@ def _score_daylight_run(
     checks: list[CheckResult] = []
     early: list[str] = []
     if window is None:
-        early.append("no data: no daylight window")
-        alert_start = datetime.combine(day, time.min, tz)
+        early.append(NO_WINDOW_REASON)
+        alert_start = _midnight(day, tz)
     else:
         checks.extend(
             _hourly_checks(
@@ -201,19 +205,21 @@ def _score_downhill_skiing(
     ]
     checks: list[CheckResult] = []
     early: list[str] = []
+    # The night leading into the day: from the previous sunset up to this day's
+    # sunrise. Today has no earlier day in the data, so it starts at the first row.
+    previous = _daylight(conditions, day - timedelta(days=1), tz)
+    is_today = day == conditions.fetched_at.astimezone(tz).date()
     if window is None:
-        early.append("no data: no daylight window")
-        alert_start = datetime.combine(day, time.min, tz)
+        early.append(NO_WINDOW_REASON)
+        alert_start = _midnight(day, tz)
+    elif previous is None and not (is_today and conditions.hourly):
+        # We can't tell where the night starts, so we can't judge the snow.
+        early.append("no data: no previous sunset to start the overnight window")
+        alert_start = _midnight(day, tz)
     else:
-        # The night leading into the day: from the previous sunset (or the start
-        # of the data, for today) up to this day's sunrise.
-        previous = _daylight(conditions, day - timedelta(days=1), tz)
-        if previous is not None:
-            overnight_start = previous.sunset
-        elif conditions.hourly:
-            overnight_start = conditions.hourly[0].time
-        else:
-            overnight_start = window.sunrise
+        overnight_start = (
+            previous.sunset if previous is not None else conditions.hourly[0].time
+        )
         checks.extend(
             _hourly_checks(
                 conditions, window.sunrise, window.sunset, rules, t.min_run_hours
@@ -256,6 +262,10 @@ def _daylight(
         if window.sunrise.astimezone(tz).date() == day:
             return window
     return None
+
+
+def _midnight(day: date, tz: ZoneInfo) -> datetime:
+    return datetime.combine(day, time.min, tz)
 
 
 def _utc(moment: datetime) -> datetime:
@@ -339,11 +349,14 @@ def _describe(
     rule: _Rule, hours: list[HourlyConditions], flags: list[bool], run: int
 ) -> str:
     text = f"{sum(flags)}/{len(hours)} hours pass, longest run {run} h"
+    if all(rule.get(hour) is None for hour in hours):
+        # e.g. an older saved response that never had this reading
+        return f"{text}; no values for this reading in the data"
     for hour, ok in zip(hours, flags, strict=True):
         if not ok:
             value = rule.get(hour)
             shown = "missing" if value is None else f"{value:g}"
-            return f"{text}; first fail {hour.time:%H:%M}: {shown}"
+            return f"{text}; first fail {hour.time:%H:%M %z}: {shown}"
     return text
 
 
@@ -367,17 +380,17 @@ def _snow_check(
     snowfall = [h.snowfall_in for h in overnight if h.snowfall_in is not None]
     depth = [h.snow_depth_in for h in daytime if h.snow_depth_in is not None]
     limit = (
-        f"overnight snowfall > {t.min_snowfall_in:g} in, "
+        f"overnight snowfall total > {t.min_snowfall_in:g} in, "
         f"or snow depth > {t.min_snow_depth_in:g} in"
     )
 
-    snowed = any(v > t.min_snowfall_in for v in snowfall)
+    snowed = bool(snowfall) and sum(snowfall) > t.min_snowfall_in
     on_ground = any(v > t.min_snow_depth_in for v in depth)
     if snowed or on_ground:
         found = []
-        if snowfall:
+        if snowfall and sum(snowfall) > 0:
             found.append(f"overnight snowfall {sum(snowfall):.2f} in")
-        if depth:
+        if depth and max(depth) > 0:
             found.append(f"snow depth up to {max(depth):.1f} in")
         return CheckResult("snow", True, "; ".join(found), limit)
     if not snowfall and not depth:
