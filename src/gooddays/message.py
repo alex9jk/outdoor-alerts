@@ -8,8 +8,10 @@ validation, a code-built fallback text is used so a good day is never lost.
 
 import json
 import logging
+import math
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -29,11 +31,16 @@ from gooddays.score import daylight_window, hours_between, not_yet_past
 
 logger = logging.getLogger(__name__)
 
-# About two SMS segments of plain ASCII.
-MESSAGE_CAP = 320
+# Two SMS segments: one segment holds 160 plain characters, but a message split into
+# several parts carries 153 per part (2 x 153 = 306).
+MESSAGE_CAP = 306
+# Below this even the one-line summary plus the longest footer might not fit.
+MIN_CAP = 80
 
-SNOW_ACTIVITIES: frozenset[str] = frozenset({"downhill_skiing", "cross_country_skiing"})
-ACTIVITY_NAMES: dict[str, str] = {
+SNOW_ACTIVITIES: frozenset[Activity] = frozenset(
+    {"downhill_skiing", "cross_country_skiing"}
+)
+ACTIVITY_NAMES: dict[Activity, str] = {
     "hiking": "hiking",
     "biking": "biking",
     "downhill_skiing": "downhill skiing",
@@ -89,6 +96,8 @@ def build_facts(
         for score in spot_score.scores:
             if score.status != "good":
                 continue
+            if spot.id not in by_spot:
+                raise ValueError(f"no conditions for scored spot {spot.id!r}")
             entry = _entry(
                 by_spot[spot.id],
                 spot,
@@ -120,19 +129,17 @@ def _entry(
     tz: ZoneInfo,
 ) -> GoodEntry:
     window = daylight_window(conditions, day, tz)
-    # The same hours the scorer judged: daylight, minus hours already over.
-    hours = (
-        not_yet_past(
-            conditions, hours_between(conditions, window.sunrise, window.sunset)
-        )
-        if window is not None
-        else []
+    daylight = (
+        hours_between(conditions, window.sunrise, window.sunset) if window else []
     )
+    # Temperature and wind use the hours the scorer judged: daylight, minus hours
+    # already over. Snow depth is judged over the whole daylight window.
+    hours = not_yet_past(conditions, daylight)
     temperatures = _present(hours, lambda h: h.temperature_f)
     winds = _present(hours, lambda h: h.wind_speed_mph)
-    depths = _present(hours, lambda h: h.snow_depth_in)
+    depths = _present(daylight, lambda h: h.snow_depth_in)
     return GoodEntry(
-        spot_name=_ascii(spot.name),
+        spot_name=_clean(spot.name) or spot.id,
         activity=activity,
         day=day,
         day_label="today" if day == today else "tomorrow",
@@ -143,7 +150,7 @@ def _entry(
         sunset=window.sunset.astimezone(tz) if window else None,
         snow_depth_in=max(depths) if depths and activity in SNOW_ACTIVITIES else None,
         alert_notes=tuple(
-            _ascii(n.removeprefix("alert: ")) for n in notes if n.startswith("alert: ")
+            _clean(n.removeprefix("alert: ")) for n in notes if n.startswith("alert: ")
         ),
     )
 
@@ -154,9 +161,26 @@ def _present(
     return [v for h in hours if (v := get(h)) is not None]
 
 
-def _ascii(text: str) -> str:
-    """Plain ASCII (accents dropped), so an SMS stays in the cheap encoding."""
-    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+# Characters that are not plain GSM-7 text (they cost two characters or switch the
+# whole SMS to a shorter encoding).
+_UNSAFE_CHARACTERS = frozenset("^{}\\[]~|`")
+
+
+def _clean(text: str) -> str:
+    """Plain, SMS-safe ASCII: accents dropped, odd characters removed, one line."""
+    ascii_text = (
+        unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    )
+    kept = "".join(
+        c if c not in _UNSAFE_CHARACTERS and (c.isprintable() or c in "\n\t") else " "
+        for c in ascii_text
+    )
+    return " ".join(kept.split())
+
+
+def _round(value: float) -> int:
+    """Round half up (Python's round() rounds halves to even: 2.5 -> 2)."""
+    return math.floor(value + 0.5)
 
 
 # --- Rendering facts as short strings (what both the AI and the fallback use) ---
@@ -170,20 +194,23 @@ def day_text(entry: GoodEntry) -> str:
 def temperature_text(entry: GoodEntry) -> str | None:
     if entry.temperature_low_f is None or entry.temperature_high_f is None:
         return None
-    low, high = round(entry.temperature_low_f), round(entry.temperature_high_f)
-    return f"{low} F" if low == high else f"{low}-{high} F"
+    low, high = _round(entry.temperature_low_f), _round(entry.temperature_high_f)
+    if low == high:
+        return f"{low} F"
+    # "-5-3 F" is unreadable, so a range that starts below zero uses words.
+    return f"{low} to {high} F" if low < 0 else f"{low}-{high} F"
 
 
 def wind_text(entry: GoodEntry) -> str | None:
     return (
-        None if entry.wind_max_mph is None else f"wind {round(entry.wind_max_mph)} mph"
+        None if entry.wind_max_mph is None else f"wind {_round(entry.wind_max_mph)} mph"
     )
 
 
 def snow_text(entry: GoodEntry) -> str | None:
-    return (
-        None if entry.snow_depth_in is None else f"{round(entry.snow_depth_in)} in snow"
-    )
+    if entry.snow_depth_in is None or _round(entry.snow_depth_in) <= 0:
+        return None  # "0 in snow" would only confuse
+    return f"{_round(entry.snow_depth_in)} in snow"
 
 
 def daylight_text(entry: GoodEntry) -> str | None:
@@ -224,47 +251,80 @@ def facts_json(facts: MessageFacts) -> str:
 
 # --- Validation ---
 
+# A number, with a minus sign only when it is a sign (not the dash in "20-28").
+_NUMBER = re.compile(r"(?<!\w)-?\d+|\d+")
+
 
 def validate_text(
     text: str, facts: MessageFacts, spots: Sequence[Spot], max_chars: int
 ) -> list[str]:
-    """What is wrong with `text` (an empty list means it is acceptable)."""
-    problems: list[str] = []
+    """What is wrong with `text` (an empty list means it is acceptable).
+
+    Known limits: numbers are checked against the set of numbers in the facts, so
+    a real number attached to the wrong fact (a wind speed that is really a
+    temperature) passes, and so does a place name that is not in the config.
+    """
     if not text.strip():
         return ["empty"]
+    problems: list[str] = []
     if not text.isascii():
         problems.append("not_ascii")
+    if any(
+        c in _UNSAFE_CHARACTERS or (ord(c) < 32 and c != "\n") or ord(c) == 127
+        for c in text
+    ):
+        problems.append("unsafe_characters")
     if len(text) > max_chars:
         problems.append("too_long")
 
     lowered = text.lower()
-    wanted = {entry.spot_name for entry in facts.entries}
-    problems.extend(
-        f"missing_entry:{name}"
-        for name in sorted(wanted)
-        if name.lower() not in lowered
-    )
+    problems.extend(_entry_problems(lowered, facts))
+
     # A configured spot that is not a good entry must not be named. Names of good
     # entries are removed first, so "Stowe" isn't found inside "Stowe Mountain".
+    wanted = {entry.spot_name for entry in facts.entries}
     rest = lowered
     for name in sorted(wanted, key=len, reverse=True):
         rest = rest.replace(name.lower(), " ")
-    problems.extend(
-        f"unknown_spot:{_ascii(spot.name)}"
-        for spot in spots
-        if _ascii(spot.name) not in wanted and _ascii(spot.name).lower() in rest
-    )
-    for label in ("today", "tomorrow"):
-        # Each label must appear exactly when some entry is on that day.
-        if any(entry.day_label == label for entry in facts.entries) != (
-            label in lowered
-        ):
-            problems.append(f"day_label:{label}")
+    for configured in spots:
+        name = _clean(configured.name) or configured.id
+        if name not in wanted and name.lower() in rest:
+            problems.append(f"unknown_spot:{name}")
 
-    allowed = set(re.findall(r"\d+", facts_json(facts)))
-    invented = sorted(set(re.findall(r"\d+", text)) - allowed)
+    allowed = set(_NUMBER.findall(facts_json(facts)))
+    invented = sorted(set(_NUMBER.findall(text)) - allowed)
     problems.extend(f"invented_number:{number}" for number in invented)
     return problems
+
+
+def _entry_problems(lowered: str, facts: MessageFacts) -> list[str]:
+    """Each entry must be in its own day's group, not just somewhere in the text."""
+    problems: list[str] = []
+    groups = _day_groups(lowered)
+    for label in ("today", "tomorrow"):
+        entries = [e for e in facts.entries if e.day_label == label]
+        # The label must appear exactly when some entry is on that day.
+        if bool(entries) != bool(groups[label]):
+            problems.append(f"day_label:{label}")
+        for activity, count in Counter(e.activity for e in entries).items():
+            if groups[label].count(ACTIVITY_NAMES[activity]) < count:
+                problems.append(f"missing_activity:{ACTIVITY_NAMES[activity]}:{label}")
+        for name, count in Counter(e.spot_name for e in entries).items():
+            if groups[label].count(name.lower()) < count:
+                problems.append(f"missing_entry:{name}:{label}")
+    return problems
+
+
+def _day_groups(lowered: str) -> dict[str, str]:
+    """The text after each 'today' / 'tomorrow', up to the next one."""
+    marks = [
+        (m.start(), m.group()) for m in re.finditer(r"\b(today|tomorrow)\b", lowered)
+    ]
+    groups = {"today": "", "tomorrow": ""}
+    for i, (start, label) in enumerate(marks):
+        end = marks[i + 1][0] if i + 1 < len(marks) else len(lowered)
+        groups[label] += lowered[start:end]
+    return groups
 
 
 # --- The code-built fallback ---
@@ -278,13 +338,16 @@ def build_fallback(facts: MessageFacts, max_chars: int) -> str:
         text = _render(facts.entries, detail, 0, footer)
         if len(text) <= max_chars:
             return text
-    for dropped in range(1, len(facts.entries) + 1):
+    # Keep at least one entry, so the text always names something.
+    for dropped in range(1, len(facts.entries)):
         text = _render(
             facts.entries[: len(facts.entries) - dropped], 0, dropped, footer
         )
         if len(text) <= max_chars:
             return text
-    return f"{len(facts.entries)} good days (too many to list)"[:max_chars]
+    count = len(facts.entries)
+    summary = f"{count} good {'outing' if count == 1 else 'outings'} (too many to list)"
+    return f"{summary}\n{footer}" if footer else summary
 
 
 def _render(
@@ -327,29 +390,56 @@ def generate_message(
 ) -> Message | None:
     """One SMS digest of the good days, or None when there is nothing to send.
 
-    With no `writer` the fallback text is used (no AI call is made).
+    With no `writer` the fallback text is used (no AI call is made). The AI is
+    also skipped when the entries cannot all fit even in the shortest form, since
+    it could not list them all either.
     """
+    if max_chars < MIN_CAP:
+        raise ValueError(f"max_chars must be at least {MIN_CAP}, got {max_chars}")
     facts = build_facts(spots, scores, conditions, errors, timezone)
     if not facts.entries:
         return None  # nothing good: no message and, importantly, no AI call
 
     footer = footer_text(facts.unchecked_spots)
     body_limit = max_chars - (len(footer) + 1 if footer else 0)
-    reason = "writer_disabled"
-    if writer is not None:
-        try:
-            text = writer(facts_json(facts), body_limit).strip()
-        except WriterError as e:
-            reason = e.reason
-        except Exception as e:  # a broken writer must not lose a good day
-            reason = f"writer_error:{type(e).__name__}"
-        else:
-            problems = validate_text(text, facts, spots, body_limit)
-            if not problems:
-                return Message(
-                    body=f"{text}\n{footer}" if footer else text, source="ai"
-                )
-            reason = f"invalid:{','.join(problems)}"
+    shortest = _render(facts.entries, 0, 0, footer)
 
-    logger.info("message_fallback reason=%r entries=%d", reason, len(facts.entries))
+    if writer is None:
+        return _fallback(facts, max_chars, "writer_disabled", warn=False)
+    if len(shortest) > max_chars:
+        return _fallback(facts, max_chars, "too_many_entries", warn=False)
+    try:
+        text = writer(facts_json(facts), body_limit)
+    except WriterError as e:
+        return _fallback(facts, max_chars, e.reason)
+    except Exception as e:  # a broken writer must not lose a good day
+        return _fallback(
+            facts, max_chars, f"writer_error:{type(e).__name__}", error=True
+        )
+    if not isinstance(text, str):
+        return _fallback(facts, max_chars, "writer_returned_non_text")
+    text = text.strip()
+    problems = validate_text(text, facts, spots, body_limit)
+    if problems:
+        # Only the kinds are logged (not names or numbers from the facts).
+        kinds = sorted({problem.split(":")[0] for problem in problems})
+        return _fallback(facts, max_chars, f"invalid:{','.join(kinds)}")
+    return Message(body=f"{text}\n{footer}" if footer else text, source="ai")
+
+
+def _fallback(
+    facts: MessageFacts,
+    max_chars: int,
+    reason: str,
+    *,
+    warn: bool = True,
+    error: bool = False,
+) -> Message:
+    log = logger.warning if warn else logger.info
+    log(
+        "message_fallback reason=%r entries=%d",
+        reason,
+        len(facts.entries),
+        exc_info=error,  # an unexpected writer exception gets its traceback
+    )
     return Message(body=build_fallback(facts, max_chars), source="fallback")

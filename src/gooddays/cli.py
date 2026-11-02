@@ -10,10 +10,9 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from gooddays.ai_writer import anthropic_writer
 from gooddays.fetch.raw import RawSnapshot, read_fetch_time, replay_fetchers
 from gooddays.fetch.service import Fetchers, fetch_conditions
-from gooddays.message import generate_message
+from gooddays.message import MessageWriter, generate_message
 from gooddays.models import FetchResult, ScoreResult, Settings, Spot
 from gooddays.report import score_to_json, score_to_text, to_json, to_text
 from gooddays.score import score_conditions
@@ -201,6 +200,13 @@ def _score(
         else score_to_text(scores, result.errors)
     )
     return EXIT_ALL_SPOTS_FAILED if result.errors and not result.results else EXIT_OK
+
+
+def anthropic_writer() -> MessageWriter:
+    """The Claude writer. Imported here so fetch and score never load the SDK."""
+    from gooddays.ai_writer import anthropic_writer as build
+
+    return build()
 
 
 def _message(

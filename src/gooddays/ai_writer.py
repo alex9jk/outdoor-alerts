@@ -7,14 +7,10 @@ Amazon Bedrock later means changing that function, `MODEL` and the fallback
 setting here, and nothing else.
 """
 
-import logging
-
 import anthropic
 from anthropic.types.beta import BetaMessageParam, BetaOutputConfigParam
 
 from gooddays.message import MessageWriter, WriterError
-
-logger = logging.getLogger(__name__)
 
 MODEL = "claude-opus-5-5"
 TIMEOUT_SECONDS = 30.0  # CLAUDE.md says 10s; Opus thinks first, so it gets longer
@@ -33,7 +29,10 @@ You write one short SMS digest telling a person which outdoor days look good.
 Rules:
 - Use ONLY the facts in the user message. Copy spot names, dates, numbers and times \
 exactly as given. Never calculate, round or invent anything.
-- Mention every entry, grouped by day, today first.
+- Mention every entry. Group the entries by day: start each day's group with the word \
+"Today" or "Tomorrow" (only for days that have entries), today first.
+- Every entry needs its spot name, activity, temperature and wind. If space is short, \
+drop daylight, snow depth and alert details first, never an entry.
 - Plain ASCII only: no degree sign, no emoji, no smart quotes or dashes.
 - At most {max_chars} characters in total, newlines included.
 - Output only the message text: no greeting, no subject, no markdown, no commentary.
@@ -53,12 +52,18 @@ def anthropic_writer(
 ) -> MessageWriter:
     """A `MessageWriter` backed by Claude. Pass `client` to substitute a stub.
 
-    The client is only built at the first call, so a run with nothing to send
-    never needs a key.
+    The client is built once, at the first call (building needs no key), so a run
+    with nothing to send never needs one.
     """
+    built: list[anthropic.Anthropic] = []
 
     def write(facts: str, max_chars: int) -> str:
-        active = client if client is not None else build_client()
+        if client is not None:
+            active = client
+        else:
+            if not built:
+                built.append(build_client())
+            active = built[0]
         messages: list[BetaMessageParam] = [{"role": "user", "content": facts}]
         try:
             response = active.beta.messages.create(
@@ -84,10 +89,13 @@ def anthropic_writer(
         except anthropic.APIConnectionError:
             raise WriterError("connection_error") from None
 
-        if response.stop_reason == "refusal":
+        stop_reason = response.stop_reason
+        if stop_reason == "refusal":
             raise WriterError("refusal")
-        if response.stop_reason == "max_tokens":
+        if stop_reason == "max_tokens":
             raise WriterError("truncated")
+        if stop_reason not in ("end_turn", "stop_sequence"):
+            raise WriterError(f"stop_{stop_reason}")  # e.g. pause_turn, tool_use
         # Only text blocks carry the message (thinking and other blocks are skipped).
         text = "".join(
             str(getattr(block, "text", ""))

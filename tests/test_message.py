@@ -19,6 +19,7 @@ from builders import (
 )
 from gooddays.message import (
     MESSAGE_CAP,
+    MIN_CAP,
     WriterError,
     build_facts,
     build_fallback,
@@ -280,7 +281,9 @@ def test_the_unchecked_count_is_distinct_spots_not_errors() -> None:
     [
         (20.0, 28.0, "20-28 F"),
         (20.4, 19.6, "20 F"),
-        (-5.0, 3.2, "-5-3 F"),
+        (-5.0, 3.2, "-5 to 3 F"),  # not "-5-3 F"
+        (-5.0, -2.0, "-5 to -2 F"),
+        (2.5, 3.5, "3-4 F"),  # halves round up, not to even
         (None, None, None),
     ],
 )
@@ -359,7 +362,7 @@ def test_a_good_text_passes_validation() -> None:
         (GOOD_TEXT + " Enjoy!" * 60, "too_long"),
         (
             "Today Thu Jan 15 and tomorrow Fri Jan 16: hiking, 60 F, wind 5 mph.",
-            "missing_entry:Warm Park",
+            "missing_entry:Warm Park:today",
         ),
         (GOOD_TEXT + " Cold Park too.", "unknown_spot:Cold Park"),
         (GOOD_TEXT.replace("60 F", "61 F"), "invented_number:61"),
@@ -375,7 +378,7 @@ def test_validation_catches_each_problem(text: str, problem: str) -> None:
 
 def test_a_day_label_with_no_entries_is_a_problem() -> None:
     only_today = facts_of([conditions("a", "Warm Park", days=(TODAY,))])
-    spots = [only_today.entries[0] and spot("a", "Warm Park", "hiking")]
+    spots = [spot("a", "Warm Park", "hiking")]
 
     problems = validate_text(
         "Today Thu Jan 15: Warm Park hiking. Tomorrow too.", only_today, spots, 320
@@ -388,7 +391,10 @@ def test_a_short_spot_name_inside_a_good_spots_name_is_not_an_unknown_spot() -> 
     mountain = conditions("a", "Stowe Mountain")
     short = spot("b", "Stowe", "hiking")  # configured, but not a good entry
     facts = facts_of([mountain])
-    text = "Today Thu Jan 15: Stowe Mountain hiking, 60 F, wind 5 mph. Tomorrow Fri Jan 16: Stowe Mountain."
+    text = (
+        "Today Thu Jan 15: Stowe Mountain hiking, 60 F, wind 5 mph. "
+        "Tomorrow Fri Jan 16: Stowe Mountain hiking, 60 F."
+    )
 
     assert validate_text(text, facts, [mountain.spot, short], 320) == []
 
@@ -474,7 +480,7 @@ def test_fallback_lists_fewer_entries_and_says_how_many_more() -> None:
     assert text.endswith("1 spot couldn't be checked")  # the footer always stays
 
 
-@pytest.mark.parametrize("cap", [320, 200, 120, 60, 25, 10])
+@pytest.mark.parametrize("cap", [306, 200, 120, MIN_CAP])
 def test_fallback_never_exceeds_the_cap(cap: int) -> None:
     assert len(build_fallback(long_facts(8), cap)) <= cap
 
@@ -531,8 +537,8 @@ def test_a_failing_writer_falls_back_and_logs_the_reason(
     [
         ("", "empty"),
         (GOOD_TEXT.replace("60 F", "60°F"), "not_ascii"),
-        (GOOD_TEXT.replace("60 F", "99 F"), "invented_number:99"),
-        ("Tomorrow only, somewhere.", "missing_entry:Warm Park"),
+        (GOOD_TEXT.replace("60 F", "99 F"), "invented_number"),
+        ("Tomorrow only, somewhere.", "missing_entry"),
         (GOOD_TEXT + "x" * 400, "too_long"),
     ],
 )
@@ -569,8 +575,20 @@ def test_fallback_logs_never_contain_the_facts_or_the_prompt(
     assert "Warm Park" not in caplog.text
 
 
+def test_validation_failures_log_only_the_kinds_not_names_or_numbers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    text = "Tomorrow Fri Jan 16: Cold Park hiking, 99 F."  # wrong spot, invented number
+
+    with caplog.at_level(logging.INFO):
+        run([conditions("a", "Warm Park")], writer=FakeWriter(text))
+
+    assert "reason='invalid:" in caplog.text
+    assert "Warm Park" not in caplog.text and "99" not in caplog.text
+
+
 def test_many_good_spots_still_make_one_short_text() -> None:
-    many = [conditions(f"s{i}", f"Park Number {i}") for i in range(12)]
+    many = [conditions(f"s{i}", f"Park Number {i}") for i in range(6)]
 
     message = run(many, writer=None)
 
@@ -594,3 +612,302 @@ def test_date_helpers_do_not_depend_on_the_machine_locale() -> None:
 
     assert [e.day for e in facts.entries] == [date(2026, 1, 15), date(2026, 1, 16)]
     assert json.loads(facts_json(facts))["entries"][1]["date"] == "Fri Jan 16"
+
+
+# --- review follow-ups: every entry must be in its own day's group ---
+
+
+def two_spots_both_days() -> tuple[MessageFacts, list[Spot]]:
+    a, b = conditions("a", "Alpha Park"), conditions("b", "Beta Park")
+    return facts_of([a, b]), [a.spot, b.spot]
+
+
+COMPLETE = (
+    "Today Thu Jan 15: Alpha Park hiking 60 F, wind 5 mph; Beta Park hiking 60 F.\n"
+    "Tomorrow Fri Jan 16: Alpha Park hiking 60 F; Beta Park hiking 60 F."
+)
+
+
+def test_a_complete_text_for_two_spots_over_two_days_passes() -> None:
+    facts, spots = two_spots_both_days()
+
+    assert validate_text(COMPLETE, facts, spots, 320) == []
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        # Beta's tomorrow entry is dropped, though Beta is named under today.
+        (
+            "Today Thu Jan 15: Alpha Park hiking, Beta Park hiking. "
+            "Tomorrow Fri Jan 16: Alpha Park hiking.",
+            "missing_entry:Beta Park:tomorrow",
+        ),
+        # Both spots named, but only under today.
+        (
+            "Today Thu Jan 15: Alpha Park hiking, Beta Park hiking. Tomorrow Fri Jan 16.",
+            "missing_entry:Alpha Park:tomorrow",
+        ),
+        # A day group that exists but names nobody.
+        (
+            "Today Thu Jan 15: Alpha Park hiking, Beta Park hiking. Tomorrow: nothing.",
+            "missing_entry:Beta Park:tomorrow",
+        ),
+        # The activity is missing from the group.
+        (
+            "Today Thu Jan 15: Alpha Park, Beta Park hiking. "
+            "Tomorrow Fri Jan 16: Alpha Park hiking, Beta Park hiking.",
+            "missing_activity:hiking:today",
+        ),
+        # Today's entries listed under tomorrow only.
+        (
+            "Tomorrow Fri Jan 16: Alpha Park hiking, Beta Park hiking.",
+            "day_label:today",
+        ),
+    ],
+)
+def test_a_dropped_entry_is_caught_even_when_the_spot_is_named_elsewhere(
+    text: str, problem: str
+) -> None:
+    facts, spots = two_spots_both_days()
+
+    assert problem in validate_text(text, facts, spots, 320)
+
+
+def test_a_spot_with_two_good_activities_must_be_named_for_each() -> None:
+    snowy = {**GOOD_HOUR, **COLD_CALM_HOUR, "snow_depth_in": 12.0}
+    both = conditions(
+        "a", "Hill", ("downhill_skiing", "cross_country_skiing"), base=snowy
+    )
+    facts = facts_of([both])
+    spots = [both.spot]
+    activities = [e.activity for e in facts.entries if e.day_label == "today"]
+    assert activities == ["downhill_skiing", "cross_country_skiing"]  # both really good
+
+    one = "Today Thu Jan 15: Hill downhill skiing 20 F. Tomorrow Fri Jan 16: Hill downhill skiing, cross-country skiing."
+    both_named = (
+        "Today Thu Jan 15: Hill downhill skiing 20 F; Hill cross-country skiing 20 F. "
+        "Tomorrow Fri Jan 16: Hill downhill skiing; Hill cross-country skiing."
+    )
+
+    assert "missing_activity:cross-country skiing:today" in validate_text(
+        one, facts, spots, 320
+    )
+    assert validate_text(both_named, facts, spots, 320) == []
+
+
+# --- validation: documented limits and new checks ---
+
+
+def test_a_missing_minus_sign_is_an_invented_number() -> None:
+    freezing = conditions(
+        "a",
+        "Cold Park",
+        base={**GOOD_HOUR, "temperature_f": -5.0, "wind_speed_mph": 5.0},
+    )
+    # Not a hiking day in reality: build the facts by hand instead.
+    facts = MessageFacts(
+        (
+            entry(
+                spot_name="Cold Park", temperature_low_f=-5.0, temperature_high_f=-2.0
+            ),
+        ),
+        0,
+    )
+    del freezing
+
+    ok = "Today Thu Jan 15: Cold Park hiking, -5 to -2 F, wind 8 mph, daylight 7:00-17:00."
+    dropped = ok.replace("-5 to", "5 to")
+
+    assert validate_text(ok, facts, [spot("a", "Cold Park", "hiking")], 320) == []
+    assert "invented_number:5" in validate_text(
+        dropped, facts, [spot("a", "Cold Park", "hiking")], 320
+    )
+
+
+def test_known_limit_a_real_number_on_the_wrong_fact_passes() -> None:
+    # 60 is the temperature, not the wind: numbers are only checked against the
+    # set of numbers in the facts (documented in CLAUDE.md).
+    facts, spots = two_day_facts()
+    text = GOOD_TEXT.replace("wind 5 mph", "wind 60 mph")
+
+    assert validate_text(text, facts, spots, 320) == []
+
+
+def test_known_limit_alerts_are_optional_in_the_text() -> None:
+    advisory = Alert("Wind Advisory", "Moderate", None, None)
+    park = conditions("a", "Warm Park", alerts=(advisory,))
+    facts = facts_of([park])
+
+    assert facts.entries[0].alert_notes == ("Wind Advisory (Moderate)",)
+    assert validate_text(GOOD_TEXT, facts, [park.spot], 320) == []  # no alert mentioned
+
+
+@pytest.mark.parametrize(
+    "char", ["[", "]", "{", "}", "\\", "^", "~", "|", "`", "\t", "\x07"]
+)
+def test_characters_outside_plain_sms_text_are_rejected(char: str) -> None:
+    facts, spots = two_day_facts()
+
+    problems = validate_text(
+        GOOD_TEXT.replace("Warm Park", f"Warm {char} Park"), facts, spots, 320
+    )
+
+    assert "unsafe_characters" in problems
+
+
+def test_names_are_cleaned_for_sms() -> None:
+    odd = conditions("a", "Café [Peak] {North}\nBowl ~ Łódź")
+
+    assert facts_of([odd]).entries[0].spot_name == "Cafe Peak North Bowl odz"
+
+
+def test_a_name_with_no_ascii_letters_falls_back_to_the_spot_id() -> None:
+    mountain = conditions("yama-1", "山")
+
+    facts = facts_of([mountain])
+
+    assert facts.entries[0].spot_name == "yama-1"
+    body = build_fallback(facts, 306)
+    assert body.startswith("Today Thu Jan 15:\nyama-1 hiking")
+
+
+def test_the_cap_is_two_sms_segments() -> None:
+    assert MESSAGE_CAP == 2 * 153
+
+
+# --- review follow-ups: facts ---
+
+
+def test_snow_depth_of_zero_is_not_shown() -> None:
+    # Good downhill day because it snowed overnight; nothing on the ground yet.
+    base = {**GOOD_HOUR, **COLD_CALM_HOUR, "snow_depth_in": 0.0}
+    edits = {(TODAY, 3): {"snowfall_in": 0.6}, (TOMORROW, 3): {"snowfall_in": 0.6}}
+    park = conditions("a", "Ski Hill", ("downhill_skiing",), base=base, edits=edits)
+    facts = facts_of([park])
+
+    assert [e.day_label for e in facts.entries] == ["today", "tomorrow"]
+    assert all(snow_text(e) is None for e in facts.entries)
+    assert "snow" not in build_fallback(facts, 306)
+
+
+def test_snow_depth_covers_the_whole_daylight_window_like_the_scorer() -> None:
+    # Fetched at 13:30; the deep snow reading is from 08:00 (already past).
+    edits = {(TODAY, 8): {"snow_depth_in": 14.0}}
+    base = {**GOOD_HOUR, **COLD_CALM_HOUR, "snow_depth_in": 2.0}
+    park = conditions(
+        "a",
+        "Ski Hill",
+        ("downhill_skiing",),
+        base=base,
+        edits=edits,
+        fetched_at=at(TODAY, 13, 30),
+    )
+
+    today = facts_of([park]).entries[0]
+
+    assert snow_text(today) == "14 in snow"
+
+
+def test_a_scored_spot_without_conditions_is_a_clear_error() -> None:
+    park = conditions("a", "Warm Park")
+    scores = score_conditions([park], THRESHOLDS, TZ)
+
+    with pytest.raises(ValueError, match="no conditions for scored spot 'a'"):
+        build_facts([park.spot], scores, [], [], TZ)
+
+
+def test_numbers_on_a_daylight_saving_change_day() -> None:
+    from gooddays.fetch.service import normalize_forecast
+    from helpers import load_fixture
+
+    hourly, daylight = normalize_forecast(
+        load_fixture("open_meteo_dst_fall_back.json"), TZ
+    )
+    warm = tuple(
+        dataclasses.replace(
+            h,
+            temperature_f=60.0,
+            precipitation_probability_pct=0,
+            rain_in=0.0,
+            precipitation_in=0.0,
+        )
+        for h in hourly
+    )
+    real = SpotConditions(
+        spot=spot("a", "Fall Back Park", "hiking"),
+        fetched_at=datetime(2026, 11, 1, 4, 30, tzinfo=UTC),  # 00:30 EDT
+        hourly=warm,
+        daylight=daylight,
+        alerts=(),
+    )
+
+    facts = facts_of([real])
+    today = facts.entries[0]
+
+    assert today.day == date(2026, 11, 1)
+    assert daylight_text(today) == "daylight 6:43-17:02"  # EST sunrise, not 7:43
+    assert temperature_text(today) == "60 F"
+
+
+# --- review follow-ups: the digest flow ---
+
+
+def test_the_ai_is_skipped_when_the_entries_cannot_all_fit(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    many = [conditions(f"s{i}", f"Park Number {i}") for i in range(12)]
+    writer = FakeWriter(GOOD_TEXT)
+
+    with caplog.at_level(logging.INFO):
+        message = run(many, writer=writer)
+
+    assert message is not None and message.source == "fallback"
+    assert writer.calls == []  # no 30 s Opus call that cannot succeed
+    assert "reason='too_many_entries'" in caplog.text
+    assert "more" in message.body and len(message.body) <= MESSAGE_CAP
+
+
+def test_a_writer_that_returns_something_other_than_text_falls_back(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO):
+        message = run([conditions("a", "Warm Park")], writer=FakeWriter(None))  # type: ignore[arg-type]
+
+    assert message is not None and message.source == "fallback"
+    assert "reason='writer_returned_non_text'" in caplog.text
+
+
+def test_real_ai_failures_are_logged_as_warnings_and_unexpected_ones_with_a_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO):
+        run(
+            [conditions("a", "Warm Park")],
+            writer=FakeWriter(error=WriterError("api_status_400")),
+        )
+        run(
+            [conditions("a", "Warm Park")],
+            writer=FakeWriter(error=RuntimeError("sdk changed")),
+        )
+        run([conditions("a", "Warm Park")], writer=None)
+
+    refused, unexpected, disabled = caplog.records
+    assert refused.levelno == logging.WARNING and not refused.exc_info
+    assert unexpected.levelno == logging.WARNING and unexpected.exc_info is not None
+    assert disabled.levelno == logging.INFO  # choosing --no-ai is not a failure
+
+
+@pytest.mark.parametrize("cap", [MIN_CAP - 1, 40, 0, -5])
+def test_a_cap_too_small_for_any_text_is_refused(cap: int) -> None:
+    with pytest.raises(ValueError, match="max_chars must be at least"):
+        run([conditions("a", "Warm Park")], max_chars=cap)
+
+
+def test_the_footer_is_kept_when_entries_are_dropped_to_fit() -> None:
+    facts = long_facts(8)
+
+    text = build_fallback(facts, MIN_CAP + 30)
+
+    assert text.endswith("1 spot couldn't be checked")
+    assert text.splitlines()[0]  # never empty, always names something

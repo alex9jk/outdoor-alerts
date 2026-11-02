@@ -16,7 +16,7 @@ from gooddays import cli
 from gooddays.cli import main
 from gooddays.fetch.nws import ALERTS_URL
 from gooddays.fetch.open_meteo import FORECAST_URL
-from gooddays.message import WriterError
+from gooddays.message import MESSAGE_CAP, WriterError
 from gooddays.storage import USER_AGENT_ENV_VAR
 from helpers import load_fixture
 
@@ -898,7 +898,7 @@ def test_message_with_ai_prints_the_ai_text(
     assert capsys.readouterr().out.rstrip("\n") == WARM_DRY_TEXT
     ((facts, max_chars),) = writer.calls
     assert json.loads(facts)["entries"][0]["spot"] == "Spot 0"
-    assert max_chars == 320
+    assert max_chars == MESSAGE_CAP
 
 
 def test_message_falls_back_when_there_is_no_key(

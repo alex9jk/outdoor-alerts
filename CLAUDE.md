@@ -28,7 +28,8 @@ DynamoDB) comes later, so keep the code free of AWS dependencies for now.
 ## Layout
 ```
 src/gooddays/
-  models.py        # Spot, HourlyConditions, Alert, SpotConditions, Thresholds, ScoreResult
+  models.py        # Spot, HourlyConditions, Alert, SpotConditions, Thresholds, ScoreResult,
+                   # GoodEntry, MessageFacts, Message
   storage.py       # Storage protocol + LocalStorage (reads spots.yaml)
   score.py         # score_conditions(): pass/fail per spot, activity and day
   message.py       # generate_message(): one SMS digest of the good days (pure parts)
@@ -104,21 +105,35 @@ nothing when there is nothing worth sending. Only printed for now; `send_notific
 (recipients, channel, sending) is a later stage.
 
 - **Code decides what is mentioned**: only `good` entries for today and tomorrow, ordered by
-  day, then spots in config order. Never the AI. Spots with unknown alerts are never good.
-  No good days means no message and no AI call (`message` prints `nothing to send`).
+  day, then spots in config order, then each spot's own activity order. Never the AI. Spots
+  with unknown alerts are never good. No good days means no message and no AI call
+  (`message` prints `nothing to send`).
 - **Each entry** shows spot, activity, weekday and date with today/tomorrow, temperature
-  range, maximum wind, daylight window, snow depth (skiing activities only) and any minor
-  alerts, using the same daylight hours the scorer judged. A short footer counts spots that
-  could not be checked ("2 spots couldn't be checked"); code appends it.
+  range, maximum wind, daylight window, snow depth (skiing activities only, and only when it
+  rounds to at least 1 in) and any minor alerts. Temperature and wind use the hours the
+  scorer judged (daylight, minus hours already over); snow depth uses the whole daylight
+  window, like the scorer. A short footer counts spots with any fetch error ("2 spots
+  couldn't be checked"); code appends it. Names are cleaned to plain SMS text (ASCII only,
+  none of `^{}\[]~|` or the backtick); a name with nothing left uses the spot id.
 - **Claude writes the wording** from those facts (`claude-opus-5-5`, effort low, 30s
-  timeout, the SDK's 2 retries, the server-side refusal fallback on). The facts go in as data;
-  alert text is never treated as instructions.
-- **Validation**: ASCII, at most 320 characters, every entry named, no unknown spot, no
-  number that is not in the facts, today/tomorrow only where there are entries.
-- **Fallback**: any AI failure (no key, network, rate limit, refusal, truncated or empty
-  reply) or failed validation uses a code-built text instead, and logs `message_fallback
-  reason=...` (never the key or the prompt). If that text is too long it drops alert notes,
-  then daylight, then snow depth, then entries ("+N more"). Never split into several texts.
+  timeout, the SDK's 2 retries, so a bad day can take up to about 90s before the fallback;
+  the server-side refusal fallback is on). The facts go in as data; alert text is never
+  treated as instructions.
+- **Validation** (`validate_text`): plain SMS-safe ASCII, at most 306 characters (two
+  multi-part SMS segments of 153; the footer counts), every entry named in its own
+  "Today"/"Tomorrow" group with its activity (so a dropped entry is caught even when the spot
+  appears elsewhere), no unknown spot, and no number that is not in the facts (a minus sign
+  counts). Known limits: a real number attached to the wrong fact passes (a wind speed that is
+  really a temperature), a place name that is not in the config is not caught, and alert
+  notes are optional in the text.
+- **Fallback**: any AI failure (no key, network, rate limit, refusal, truncated, empty or
+  non-text reply, an unexpected exception) or failed validation uses a code-built text, and
+  logs `message_fallback reason=...` at WARNING (INFO for `--no-ai`; an unexpected exception
+  includes its traceback). Reasons never contain the key, the prompt, or names or numbers from
+  the facts. If there are too many entries to list even in the shortest form, the AI is not
+  called at all. A too-long fallback drops alert notes, then daylight, then snow depth, then
+  entries ("+N more", always keeping at least one entry and the footer). Never split into
+  several texts. A cap below 80 characters is refused.
 - Moving to Amazon Bedrock later means changing `build_client`, `MODEL` and the fallback
   setting in `ai_writer.py` (the SDK has a Bedrock client); nothing else.
 
@@ -128,8 +143,9 @@ nothing when there is nothing worth sending. Only printed for now; `send_notific
 - **One bad spot never fails the run.** Catch per-spot errors, record them in
   `errors`, and keep going.
 - Retries: up to 3 attempts with exponential backoff on timeouts and 5xx only.
-  Never retry 4xx.
-- Timeouts: 10s per request.
+  Never retry 4xx. (The Claude SDK call in `ai_writer.py` is the one exception: it uses
+  the SDK's own retries, which also cover 408, 409 and 429.)
+- Timeouts: 10s per request. (Except the Claude call, which gets 30s because Opus thinks first.)
 - Fetch spots concurrently (async `httpx`), but cap concurrency at 5.
 - Keep API clients thin: they return parsed raw responses. Normalization
   happens in `service.py`, so it can be tested from fixtures alone.
