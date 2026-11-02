@@ -1,4 +1,4 @@
-"""Command line entry point: `python -m gooddays fetch`."""
+"""Command line entry point: `fetch` and `score` for `python -m gooddays`."""
 
 import argparse
 import asyncio
@@ -12,7 +12,9 @@ from zoneinfo import ZoneInfo
 
 from gooddays.fetch.raw import RawSnapshot, read_fetch_time, replay_fetchers
 from gooddays.fetch.service import Fetchers, fetch_conditions
-from gooddays.report import to_json, to_text
+from gooddays.models import Settings, Spot
+from gooddays.report import score_to_json, score_to_text, to_json, to_text
+from gooddays.score import score_conditions
 from gooddays.storage import ConfigError, LocalStorage
 
 logger = logging.getLogger(__name__)
@@ -42,13 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
             "70 unexpected error, 130 interrupted, 141 stdout closed early."
         ),
     )
-    fetch.add_argument(
-        "--spots",
-        type=Path,
-        default=Path("spots.yaml"),
-        help="config file (default: spots.yaml in the current directory)",
-    )
-    fetch.add_argument("--json", action="store_true", help="print JSON, not text")
+    _add_common_options(fetch)
     fetch.add_argument(
         "--raw-root",
         type=Path,
@@ -69,7 +65,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="replay a folder written by --save-raw "
         f"(e.g. {DEFAULT_RAW_ROOT}/2026-01-15) instead of calling the APIs",
     )
+
+    score = commands.add_parser(
+        "score",
+        help="fetch conditions, then say whether each day is good per activity",
+        description=(
+            "Prints pass/fail per spot, activity, and day (today and tomorrow), "
+            "using the thresholds in the config file. Same exit codes as fetch "
+            "(a day that isn't good is output, not an error), except 3 never applies."
+        ),
+    )
+    _add_common_options(score)
+    score.add_argument(
+        "--fixtures",
+        type=Path,
+        metavar="DIR",
+        help="score a folder written by `fetch --save-raw` instead of calling the APIs",
+    )
     return parser
+
+
+def _add_common_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--spots",
+        type=Path,
+        default=Path("spots.yaml"),
+        help="config file (default: spots.yaml in the current directory)",
+    )
+    parser.add_argument("--json", action="store_true", help="print JSON, not text")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -108,6 +131,36 @@ def _run(argv: Sequence[str] | None) -> int:
         print(f"config error: {e}", file=sys.stderr)
         return EXIT_USAGE_OR_CONFIG
 
+    if args.command == "score":
+        return _score(args, settings, spots, storage)
+    return _fetch(args, settings, spots)
+
+
+def _score(
+    args: argparse.Namespace,
+    settings: Settings,
+    spots: list[Spot],
+    storage: LocalStorage,
+) -> int:
+    try:
+        thresholds = storage.get_thresholds()  # checked before anything is fetched
+    except ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return EXIT_USAGE_OR_CONFIG
+    fetchers, fetched_at = _replay(args.fixtures)
+    result = asyncio.run(
+        fetch_conditions(spots, settings, fetchers=fetchers, fetched_at=fetched_at)
+    )
+    scores = score_conditions(result.results, thresholds, settings.timezone)
+    _emit(
+        score_to_json(scores, result.errors)
+        if args.json
+        else score_to_text(scores, result.errors)
+    )
+    return EXIT_ALL_SPOTS_FAILED if result.errors and not result.results else EXIT_OK
+
+
+def _fetch(args: argparse.Namespace, settings: Settings, spots: list[Spot]) -> int:
     started = datetime.now(ZoneInfo(settings.timezone))
     snapshot: RawSnapshot | None = None
     on_raw = None
@@ -123,15 +176,8 @@ def _run(argv: Sequence[str] | None) -> int:
             )
             return EXIT_SAVE_FAILED
         on_raw = snapshot.writer()
-    elif args.fixtures is not None:
-        fetchers = replay_fetchers(args.fixtures)
-        fetched_at = read_fetch_time(args.fixtures)
-        if fetched_at is None:
-            logger.warning(
-                "replay_without_fetch_time dir=%r note=%r",
-                str(args.fixtures),
-                "results will show the replay time as fetched_at",
-            )
+    else:
+        fetchers, fetched_at = _replay(args.fixtures)
 
     try:
         result = asyncio.run(
@@ -152,6 +198,20 @@ def _run(argv: Sequence[str] | None) -> int:
     if result.errors and not result.results:
         return EXIT_ALL_SPOTS_FAILED
     return EXIT_OK if saved else EXIT_SAVE_FAILED
+
+
+def _replay(directory: Path | None) -> tuple[Fetchers | None, datetime | None]:
+    """Fetchers and fetch time for --fixtures, or (None, None) for a live run."""
+    if directory is None:
+        return None, None
+    fetched_at = read_fetch_time(directory)
+    if fetched_at is None:
+        logger.warning(
+            "replay_without_fetch_time dir=%r note=%r",
+            str(directory),
+            "results will show the replay time as fetched_at",
+        )
+    return replay_fetchers(directory), fetched_at
 
 
 def _finish_snapshot(snapshot: RawSnapshot | None, *, has_results: bool) -> bool:

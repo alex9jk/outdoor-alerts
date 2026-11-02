@@ -688,3 +688,49 @@ async def test_fetched_at_can_be_overridden() -> None:
     )
 
     assert [r.fetched_at for r in result.results] == [when, when]
+
+
+def test_snow_depth_is_converted_from_feet_to_inches() -> None:
+    raw = load_fixture("open_meteo_sunny.json")
+    raw["hourly"]["snow_depth"] = [0.5, 1.0, None]
+
+    hourly, _ = normalize_forecast(raw, TZ)
+
+    assert [h.snow_depth_in for h in hourly] == [6.0, 12.0, None]
+
+
+def test_missing_snow_depth_series_is_none() -> None:
+    hourly, _ = normalize_forecast(load_fixture("open_meteo_sunny.json"), TZ)
+
+    assert all(h.snow_depth_in is None for h in hourly)
+
+
+def test_bad_snow_depth_is_a_normalize_error() -> None:
+    raw = load_fixture("open_meteo_sunny.json")
+    raw["hourly"]["snow_depth"] = ["deep", 0, 0]
+
+    with pytest.raises(NormalizeError, match="not a finite number"):
+        normalize_forecast(raw, TZ)
+
+
+def test_rain_is_read_as_liquid_inches() -> None:
+    raw = load_fixture("open_meteo_sunny.json")
+    raw["hourly"]["rain"] = [0.0, 0.012, None]
+
+    hourly, _ = normalize_forecast(raw, TZ)
+
+    assert [h.rain_in for h in hourly] == [0.0, 0.012, None]
+
+
+def test_a_missing_rain_series_is_none() -> None:
+    hourly, _ = normalize_forecast(load_fixture("open_meteo_sunny.json"), TZ)
+
+    assert all(h.rain_in is None for h in hourly)
+
+
+def test_bad_rain_is_a_normalize_error() -> None:
+    raw = load_fixture("open_meteo_sunny.json")
+    raw["hourly"]["rain"] = ["wet", 0, 0]
+
+    with pytest.raises(NormalizeError, match="not a finite number"):
+        normalize_forecast(raw, TZ)

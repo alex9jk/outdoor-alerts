@@ -1,11 +1,27 @@
 import dataclasses
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from gooddays.fetch.service import normalize_alerts, normalize_forecast
-from gooddays.models import Alert, FetchResult, Spot, SpotConditions, SpotError
-from gooddays.report import to_json, to_text
+from gooddays.models import (
+    ActivityScore,
+    Alert,
+    CheckResult,
+    FetchResult,
+    ScoreResult,
+    Spot,
+    SpotConditions,
+    SpotError,
+    SpotScore,
+)
+from gooddays.report import (
+    ACTIVITY_WIDTH,
+    score_to_json,
+    score_to_text,
+    to_json,
+    to_text,
+)
 from helpers import load_fixture
 
 SPOT = Spot(
@@ -13,7 +29,7 @@ SPOT = Spot(
     name="Bristol",
     lat=42.745,
     lon=-77.404,
-    activities=("skiing", "hiking"),
+    activities=("downhill_skiing", "hiking"),
 )
 
 
@@ -112,7 +128,7 @@ def test_json_structure_and_iso_datetimes() -> None:
         "name": "Bristol",
         "lat": 42.745,
         "lon": -77.404,
-        "activities": ["skiing", "hiking"],
+        "activities": ["downhill_skiing", "hiking"],
     }
     assert spot_json["fetched_at"] == "2026-06-15T12:00:00+00:00"
     assert spot_json["hourly"][0]["time"] == "2026-06-15T09:00:00-04:00"
@@ -167,3 +183,123 @@ def test_text_negative_temperatures_are_readable() -> None:
     text = to_text(result_of(dataclasses.replace(cold, hourly=hours)))
 
     assert "temp -5 to -2F" in text
+
+
+# --- scores ---
+
+
+def score_result() -> ScoreResult:
+    day = date(2026, 1, 15)
+    hiking = ActivityScore(
+        "hiking",
+        day,
+        "good",
+        (CheckResult("alerts", True, "none severe", "x"),),
+        (),
+        (),
+    )
+    skiing = ActivityScore(
+        "downhill_skiing",
+        day,
+        "not_good",
+        (CheckResult("snow", False, "no data", "snowfall > 0 in"),),
+        ("snow: no data (needs snowfall > 0 in)",),
+        ("alert: Wind Advisory (Moderate)",),
+    )
+    biking = ActivityScore("biking", day, "no_rules", (), (), ("no rules yet",))
+    return ScoreResult(
+        results=(
+            SpotScore(
+                SPOT, datetime(2026, 1, 15, 12, tzinfo=UTC), (hiking, skiing, biking)
+            ),
+        )
+    )
+
+
+def row(day: str, activity: str, status: str) -> str:
+    return f"  {day}  {activity:<20} {status}"
+
+
+def test_score_text_shows_status_reasons_and_notes() -> None:
+    text = score_to_text(score_result(), [])
+
+    assert text.splitlines() == [
+        "Bristol (bristol)",
+        row("2026-01-15", "hiking", "GOOD"),
+        row("2026-01-15", "downhill_skiing", "NOT GOOD"),
+        "      - snow: no data (needs snowfall > 0 in)",
+        "      alert: Wind Advisory (Moderate)",
+        row("2026-01-15", "biking", "no rules yet"),
+        "",
+        "1 spot(s) scored, 1 good day(s), 0 error(s)",
+    ]
+
+
+def test_score_text_lists_fetch_errors() -> None:
+    errors = [SpotError("spot-9", "open_meteo", "HTTP 500", 500)]
+
+    text = score_to_text(score_result(), errors)
+
+    assert "ERROR spot-9 [open_meteo] HTTP 500 (status 500)" in text
+    assert text.endswith("1 spot(s) scored, 1 good day(s), 1 error(s)")
+
+
+def test_score_text_with_nothing_scored() -> None:
+    assert score_to_text(ScoreResult(results=()), []) == (
+        "0 spot(s) scored, 0 good day(s), 0 error(s)"
+    )
+
+
+def test_score_json_has_every_check_with_value_and_limit() -> None:
+    errors = [SpotError("spot-9", "nws", "HTTP 503", 503)]
+
+    data = json.loads(score_to_json(score_result(), errors))
+
+    (spot_score,) = data["scores"]
+    assert spot_score["spot"]["id"] == "bristol"
+    hiking, skiing, biking = spot_score["scores"]
+    assert (hiking["activity"], hiking["day"], hiking["status"]) == (
+        "hiking",
+        "2026-01-15",
+        "good",
+    )
+    assert skiing["status"] == "not_good"
+    assert skiing["checks"] == [
+        {
+            "name": "snow",
+            "passed": False,
+            "value": "no data",
+            "limit": "snowfall > 0 in",
+        }
+    ]
+    assert skiing["reasons"] == ["snow: no data (needs snowfall > 0 in)"]
+    assert skiing["notes"] == ["alert: Wind Advisory (Moderate)"]
+    assert biking["status"] == "no_rules"
+    assert data["errors"] == [
+        {
+            "spot_id": "spot-9",
+            "source": "nws",
+            "message": "HTTP 503",
+            "status_code": 503,
+        }
+    ]
+
+
+def test_score_text_columns_line_up_for_the_longest_activity_name() -> None:
+    day = date(2026, 1, 15)
+    scores = (
+        ActivityScore("hiking", day, "good", (), (), ()),
+        ActivityScore("cross_country_skiing", day, "good", (), (), ()),
+    )
+    result = ScoreResult(
+        results=(SpotScore(SPOT, datetime(2026, 1, 15, 12, tzinfo=UTC), scores),)
+    )
+
+    _, short, long = score_to_text(result, []).splitlines()[:3]
+
+    assert short.index("GOOD") == long.index("GOOD")
+    assert "cross_country_skiing GOOD" in long
+
+
+def test_activity_column_fits_the_longest_activity_name() -> None:
+    assert ACTIVITY_WIDTH == len("cross_country_skiing")

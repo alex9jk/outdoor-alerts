@@ -1,23 +1,28 @@
-"""Render a FetchResult for people (text) or programs (JSON).
+"""Render results for people (text) or programs (JSON).
 
-Text shows plain per-day summaries of the fetched data. It does no scoring.
+The fetch renderers show plain per-day summaries of the fetched data and do no
+scoring; the score renderers show what score_conditions decided.
 """
 
 import dataclasses
 import json
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, tzinfo
-from typing import Any
+from typing import Any, get_args
 
 from gooddays.models import (
+    Activity,
     Alert,
     DaylightWindow,
     FetchResult,
     HourlyConditions,
+    ScoreResult,
     SpotConditions,
     SpotError,
 )
+
+ACTIVITY_WIDTH = max(len(activity) for activity in get_args(Activity))
 
 
 def to_json(result: FetchResult) -> str:
@@ -35,6 +40,38 @@ def to_text(result: FetchResult) -> str:
     return "\n".join(lines)
 
 
+def score_to_json(scores: ScoreResult, errors: Sequence[SpotError]) -> str:
+    """Every score with each check's value and limit, plus the fetch errors."""
+    return json.dumps(
+        _jsonable({"scores": scores.results, "errors": list(errors)}), indent=2
+    )
+
+
+def score_to_text(scores: ScoreResult, errors: Sequence[SpotError]) -> str:
+    lines: list[str] = []
+    good = 0
+    for spot_score in scores.results:
+        lines.append(f"{spot_score.spot.name} ({spot_score.spot.id})")
+        for score in spot_score.scores:
+            heading = f"  {score.day}  {score.activity:<{ACTIVITY_WIDTH}}"
+            if score.status == "no_rules":
+                lines.append(f"{heading} no rules yet")
+                continue
+            good += score.status == "good"
+            lines.append(
+                f"{heading} {'GOOD' if score.status == 'good' else 'NOT GOOD'}"
+            )
+            lines.extend(f"      - {reason}" for reason in score.reasons)
+            lines.extend(f"      {note}" for note in score.notes)
+        lines.append("")
+    lines.extend(_error_line(error) for error in errors)
+    lines.append(
+        f"{len(scores.results)} spot(s) scored, {good} good day(s), "
+        f"{len(errors)} error(s)"
+    )
+    return "\n".join(lines)
+
+
 def _jsonable(value: Any) -> Any:
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {
@@ -42,6 +79,8 @@ def _jsonable(value: Any) -> Any:
         }
     if isinstance(value, datetime | date):
         return value.isoformat()
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
     if isinstance(value, list | tuple):
         return [_jsonable(item) for item in value]
     return value

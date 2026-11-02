@@ -264,9 +264,11 @@ def normalize_forecast(
                     series["precipitation_probability"][i], _int
                 ),
                 precipitation_in=_opt(series["precipitation"][i], _float),
+                rain_in=_opt(series["rain"][i], _float),
                 wind_speed_mph=_opt(series["wind_speed_10m"][i], _float),
                 wind_gust_mph=_opt(series["wind_gusts_10m"][i], _float),
                 snowfall_in=_opt(series["snowfall"][i], _float),
+                snow_depth_in=_opt(series["snow_depth"][i], _feet_to_inches),
                 weather_code=_opt(series["weather_code"][i], _int),
             )
             for i in range(n)
@@ -363,6 +365,10 @@ def _float(value: Any) -> float:
     if not math.isfinite(value):
         raise ValueError(f"not a finite number: {value!r}")
     return float(value)
+
+
+def _feet_to_inches(value: Any) -> float:
+    return _float(value) * 12
 
 
 def _int(value: Any) -> int:
