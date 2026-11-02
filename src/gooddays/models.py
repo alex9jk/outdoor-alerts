@@ -155,3 +155,35 @@ class SpotScore:
 @dataclass(frozen=True, slots=True)
 class ScoreResult:
     results: tuple[SpotScore, ...]
+
+
+# --- Messages (generate_message) ---
+
+
+@dataclass(frozen=True, slots=True)
+class GoodEntry:
+    """One good spot/activity/day, with the numbers a message can mention."""
+
+    spot_name: str  # ASCII-only, so it can go straight into an SMS
+    activity: Activity
+    day: date
+    day_label: Literal["today", "tomorrow"]
+    temperature_low_f: float | None
+    temperature_high_f: float | None
+    wind_max_mph: float | None
+    sunrise: datetime | None
+    sunset: datetime | None
+    snow_depth_in: float | None  # only set for the skiing activities
+    alert_notes: tuple[str, ...]  # non-severe alerts still active
+
+
+@dataclass(frozen=True, slots=True)
+class MessageFacts:
+    entries: tuple[GoodEntry, ...]
+    unchecked_spots: int  # spots with any fetch error
+
+
+@dataclass(frozen=True, slots=True)
+class Message:
+    body: str  # SMS text: plain ASCII, no subject
+    source: Literal["ai", "fallback"]

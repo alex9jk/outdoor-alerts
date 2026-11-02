@@ -16,6 +16,7 @@ from gooddays import cli
 from gooddays.cli import main
 from gooddays.fetch.nws import ALERTS_URL
 from gooddays.fetch.open_meteo import FORECAST_URL
+from gooddays.message import WriterError
 from gooddays.storage import USER_AGENT_ENV_VAR
 from helpers import load_fixture
 
@@ -839,3 +840,203 @@ def test_replaying_a_folder_saved_before_rain_and_snow_depth_existed(
     out = capsys.readouterr().out
     assert row("2026-06-15", "cross_country_skiing", "NOT GOOD") in out
     assert "snow_depth_in:" in out and "no values for this reading in the data" in out
+
+
+# --- message ---
+
+# Facts for the saved warm, dry run: Spot 0 (hiking) is good on both days; Spot 1
+# (downhill skiing) is not. The numbers below come from that fixture.
+WARM_DRY_TEXT = (
+    "Today Mon Jun 15: Spot 0 hiking, 65 F, wind 5 mph.\n"
+    "Tomorrow Tue Jun 16: Spot 0 hiking, 65 F, wind 5 mph."
+)
+
+
+def fake_writer(text: str = WARM_DRY_TEXT, error: Exception | None = None) -> Any:
+    calls: list[tuple[str, int]] = []
+
+    def write(facts: str, max_chars: int) -> str:
+        calls.append((facts, max_chars))
+        if error is not None:
+            raise error
+        return text
+
+    write.calls = calls  # type: ignore[attr-defined]
+    return write
+
+
+def use_writer(monkeypatch: pytest.MonkeyPatch, writer: Any) -> None:
+    monkeypatch.setattr(cli, "anthropic_writer", lambda: writer)
+
+
+def test_message_no_ai_prints_the_code_built_text(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+
+    assert main(["message", "--no-ai", "--fixtures", str(folder)]) == 0
+
+    out = capsys.readouterr().out
+    assert out.splitlines() == [
+        "Today Mon Jun 15:",
+        "Spot 0 hiking: 65 F, wind 5 mph, daylight 5:25-20:35",
+        "Tomorrow Tue Jun 16:",
+        "Spot 0 hiking: 65 F, wind 5 mph, daylight 5:25-20:36",
+    ]
+    assert "Spot 1" not in out  # not a good day, so not mentioned
+
+
+def test_message_with_ai_prints_the_ai_text(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    writer = fake_writer()
+    use_writer(monkeypatch, writer)
+
+    assert main(["message", "--fixtures", str(folder)]) == 0
+
+    assert capsys.readouterr().out.rstrip("\n") == WARM_DRY_TEXT
+    ((facts, max_chars),) = writer.calls
+    assert json.loads(facts)["entries"][0]["spot"] == "Spot 0"
+    assert max_chars == 320
+
+
+def test_message_falls_back_when_there_is_no_key(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    use_writer(monkeypatch, fake_writer(error=WriterError("no_credentials")))
+
+    with caplog.at_level(logging.INFO):
+        assert main(["message", "--fixtures", str(folder)]) == 0
+
+    assert "Spot 0 hiking: 65 F" in capsys.readouterr().out  # the fallback text
+    assert "message_fallback reason='no_credentials'" in caplog.text
+
+
+def test_message_no_ai_never_builds_a_writer(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def forbidden() -> Any:
+        raise AssertionError("--no-ai must not build the Claude writer")
+
+    monkeypatch.setattr(cli, "anthropic_writer", forbidden)
+    folder = write_warm_dry_run(project / "saved")
+
+    assert main(["message", "--no-ai", "--fixtures", str(folder)]) == 0
+
+
+def test_message_with_nothing_good_says_so_and_never_calls_the_writer(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writer = fake_writer()
+    use_writer(monkeypatch, writer)
+    folder = write_saved_run(project / "saved")  # sunny fixture, no good days today
+
+    assert main(["message", "--fixtures", str(folder)]) == 0
+
+    assert capsys.readouterr().out == "nothing to send\n"
+    assert writer.calls == []
+
+
+def test_message_when_every_spot_fails_exits_1(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (project / "empty").mkdir()
+
+    assert main(["message", "--no-ai", "--fixtures", str(project / "empty")]) == 1
+
+    assert capsys.readouterr().out == "nothing to send\n"
+
+
+def test_message_adds_a_footer_for_spots_that_could_not_be_checked(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    (folder / "spot-1" / "open_meteo.json").unlink()  # spot-1 can't be checked
+    use_writer(monkeypatch, fake_writer())
+
+    assert main(["message", "--fixtures", str(folder)]) == 0
+
+    out = capsys.readouterr().out
+    assert out == WARM_DRY_TEXT + "\n1 spot couldn't be checked\n"
+
+
+def test_message_with_bad_thresholds_exits_2(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (project / "spots.yaml").write_text(
+        SPOTS_YAML.replace("max_rain_in: 0", "max_rain_in: -1")
+    )
+
+    assert main(["message", "--no-ai"]) == 2
+
+    assert (
+        "config error: thresholds.cross_country_skiing.max_rain_in"
+        in capsys.readouterr().err
+    )
+
+
+def test_message_fixtures_must_be_a_directory(project: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["message", "--fixtures", str(project / "nope")])
+
+    assert exc.value.code == 2
+
+
+def test_message_has_no_json_option() -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["message", "--json"])
+
+    assert exc.value.code == 2
+
+
+def test_message_unexpected_error_exits_70(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def explode(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cli, "generate_message", explode)
+    folder = write_warm_dry_run(project / "saved")
+
+    assert main(["message", "--no-ai", "--fixtures", str(folder)]) == 70
+
+
+def test_message_runs_as_a_module(project: Path) -> None:
+    folder = write_warm_dry_run(project / "saved")
+
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "gooddays",
+            "message",
+            "--no-ai",
+            "--fixtures",
+            str(folder),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert done.returncode == 0
+    assert done.stdout.startswith("Today Mon Jun 15:")
+    assert "message_fallback reason='writer_disabled'" in done.stderr
+    assert "level=" not in done.stdout  # logs stay on stderr
+
+
+def test_message_help_mentions_the_key_and_no_ai() -> None:
+    done = subprocess.run(
+        [sys.executable, "-m", "gooddays", "message", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert done.returncode == 0
+    assert "--no-ai" in done.stdout and "ANTHROPIC_API_KEY" in done.stdout

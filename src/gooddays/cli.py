@@ -1,4 +1,4 @@
-"""Command line entry point: `fetch` and `score` for `python -m gooddays`."""
+"""Command line entry point: `fetch`, `score` and `message` of `python -m gooddays`."""
 
 import argparse
 import asyncio
@@ -10,9 +10,11 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from gooddays.ai_writer import anthropic_writer
 from gooddays.fetch.raw import RawSnapshot, read_fetch_time, replay_fetchers
 from gooddays.fetch.service import Fetchers, fetch_conditions
-from gooddays.models import Settings, Spot
+from gooddays.message import generate_message
+from gooddays.models import FetchResult, ScoreResult, Settings, Spot
 from gooddays.report import score_to_json, score_to_text, to_json, to_text
 from gooddays.score import score_conditions
 from gooddays.storage import ConfigError, LocalStorage
@@ -82,16 +84,43 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="score a folder written by `fetch --save-raw` instead of calling the APIs",
     )
+
+    message = commands.add_parser(
+        "message",
+        help="write one SMS digest of the good days (today and tomorrow)",
+        description=(
+            "Fetches, scores, and prints one short text listing only the good days, "
+            "or 'nothing to send'. Claude writes the text (needs ANTHROPIC_API_KEY); "
+            "if it can't, or its text fails checks, a plain text built by code is "
+            "printed instead. Exit codes as for score."
+        ),
+    )
+    _add_spots_option(message)
+    message.add_argument(
+        "--fixtures",
+        type=Path,
+        metavar="DIR",
+        help="use a folder written by `fetch --save-raw` instead of calling the APIs",
+    )
+    message.add_argument(
+        "--no-ai",
+        action="store_true",
+        help="skip Claude and print the code-built text (works offline, needs no key)",
+    )
     return parser
 
 
-def _add_common_options(parser: argparse.ArgumentParser) -> None:
+def _add_spots_option(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--spots",
         type=Path,
         default=Path("spots.yaml"),
         help="config file (default: spots.yaml in the current directory)",
     )
+
+
+def _add_common_options(parser: argparse.ArgumentParser) -> None:
+    _add_spots_option(parser)
     parser.add_argument("--json", action="store_true", help="print JSON, not text")
 
 
@@ -131,9 +160,32 @@ def _run(argv: Sequence[str] | None) -> int:
         print(f"config error: {e}", file=sys.stderr)
         return EXIT_USAGE_OR_CONFIG
 
-    if args.command == "score":
-        return _score(args, settings, spots, storage)
-    return _fetch(args, settings, spots)
+    if args.command == "fetch":
+        return _fetch(args, settings, spots)
+    try:
+        if args.command == "score":
+            return _score(args, settings, spots, storage)
+        if args.command == "message":
+            return _message(args, settings, spots, storage)
+    except ConfigError as e:  # the thresholds are checked before anything is fetched
+        print(f"config error: {e}", file=sys.stderr)
+        return EXIT_USAGE_OR_CONFIG
+    raise AssertionError(f"unhandled command: {args.command!r}")
+
+
+def _score_run(
+    args: argparse.Namespace,
+    settings: Settings,
+    spots: list[Spot],
+    storage: LocalStorage,
+) -> tuple[FetchResult, ScoreResult]:
+    """Fetch (or replay) and score. Raises ConfigError for bad thresholds."""
+    thresholds = storage.get_thresholds()  # checked before anything is fetched
+    fetchers, fetched_at = _replay(args.fixtures)
+    result = asyncio.run(
+        fetch_conditions(spots, settings, fetchers=fetchers, fetched_at=fetched_at)
+    )
+    return result, score_conditions(result.results, thresholds, settings.timezone)
 
 
 def _score(
@@ -142,21 +194,31 @@ def _score(
     spots: list[Spot],
     storage: LocalStorage,
 ) -> int:
-    try:
-        thresholds = storage.get_thresholds()  # checked before anything is fetched
-    except ConfigError as e:
-        print(f"config error: {e}", file=sys.stderr)
-        return EXIT_USAGE_OR_CONFIG
-    fetchers, fetched_at = _replay(args.fixtures)
-    result = asyncio.run(
-        fetch_conditions(spots, settings, fetchers=fetchers, fetched_at=fetched_at)
-    )
-    scores = score_conditions(result.results, thresholds, settings.timezone)
+    result, scores = _score_run(args, settings, spots, storage)
     _emit(
         score_to_json(scores, result.errors)
         if args.json
         else score_to_text(scores, result.errors)
     )
+    return EXIT_ALL_SPOTS_FAILED if result.errors and not result.results else EXIT_OK
+
+
+def _message(
+    args: argparse.Namespace,
+    settings: Settings,
+    spots: list[Spot],
+    storage: LocalStorage,
+) -> int:
+    result, scores = _score_run(args, settings, spots, storage)
+    message = generate_message(
+        spots,
+        scores,
+        result.results,
+        result.errors,
+        settings.timezone,
+        writer=None if args.no_ai else anthropic_writer(),
+    )
+    _emit(message.body if message is not None else "nothing to send")
     return EXIT_ALL_SPOTS_FAILED if result.errors and not result.results else EXIT_OK
 
 
