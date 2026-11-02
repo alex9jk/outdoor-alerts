@@ -264,6 +264,7 @@ def normalize_forecast(
                     series["precipitation_probability"][i], _int
                 ),
                 precipitation_in=_opt(series["precipitation"][i], _float),
+                rain_in=_opt(series["rain"][i], _float),
                 wind_speed_mph=_opt(series["wind_speed_10m"][i], _float),
                 wind_gust_mph=_opt(series["wind_gusts_10m"][i], _float),
                 snowfall_in=_opt(series["snowfall"][i], _float),

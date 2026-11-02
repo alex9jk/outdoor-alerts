@@ -15,9 +15,10 @@ import yaml
 from gooddays.models import (
     SPOT_ID_PATTERN,
     Activity,
+    CrossCountrySkiingThresholds,
+    DownhillSkiingThresholds,
     HikingThresholds,
     Settings,
-    SkiingThresholds,
     Spot,
     Thresholds,
 )
@@ -77,34 +78,24 @@ class LocalStorage:
         raw = self._load().get("thresholds")
         if not isinstance(raw, dict):
             raise ConfigError("missing 'thresholds' mapping")
+        if "skiing" in raw:
+            raise ConfigError(_SKIING_RENAMED.replace("{where}", "thresholds"))
         if "biking" in raw:
             raise ConfigError(
                 "thresholds.biking: there are no biking rules yet; remove it"
             )
-        unknown = sorted(str(k) for k in set(raw) - {"hiking", "skiing"})
+        unknown = sorted(str(k) for k in set(raw) - set(_THRESHOLD_KEYS))
         if unknown:
             raise ConfigError(f"thresholds has unknown activities: {unknown}")
 
-        hiking = _threshold_block(
-            raw,
-            "hiking",
-            {
-                "min_temperature_f",
-                "max_precipitation_probability_pct",
-                "max_precipitation_in",
-                "min_run_hours",
-            },
-        )
-        skiing = _threshold_block(
-            raw,
-            "skiing",
-            {
-                "max_temperature_f",
-                "max_wind_mph",
-                "min_snowfall_in",
-                "min_snow_depth_in",
-                "min_run_hours",
-            },
+        blocks = {
+            activity: _threshold_block(raw, activity, keys)
+            for activity, keys in _THRESHOLD_KEYS.items()
+        }
+        hiking, downhill, xc = (
+            blocks["hiking"],
+            blocks["downhill_skiing"],
+            blocks["cross_country_skiing"],
         )
         return Thresholds(
             hiking=HikingThresholds(
@@ -123,21 +114,8 @@ class LocalStorage:
                 ),
                 min_run_hours=_run_hours(hiking, "thresholds.hiking"),
             ),
-            skiing=SkiingThresholds(
-                max_temperature_f=_threshold_number(
-                    skiing, "max_temperature_f", "thresholds.skiing"
-                ),
-                max_wind_mph=_threshold_number(
-                    skiing, "max_wind_mph", "thresholds.skiing", minimum=0
-                ),
-                min_snowfall_in=_threshold_number(
-                    skiing, "min_snowfall_in", "thresholds.skiing", minimum=0
-                ),
-                min_snow_depth_in=_threshold_number(
-                    skiing, "min_snow_depth_in", "thresholds.skiing", minimum=0
-                ),
-                min_run_hours=_run_hours(skiing, "thresholds.skiing"),
-            ),
+            downhill_skiing=_downhill(downhill),
+            cross_country_skiing=_cross_country(xc),
         )
 
     def _load(self) -> dict[str, Any]:
@@ -152,6 +130,73 @@ class LocalStorage:
         if not isinstance(data, dict):
             raise ConfigError(f"{self._path} must contain a mapping at the top level")
         return data
+
+
+_THRESHOLD_KEYS: dict[str, set[str]] = {
+    "hiking": {
+        "min_temperature_f",
+        "max_precipitation_probability_pct",
+        "max_precipitation_in",
+        "min_run_hours",
+    },
+    "downhill_skiing": {
+        "max_temperature_f",
+        "max_wind_mph",
+        "min_snowfall_in",
+        "min_snow_depth_in",
+        "min_run_hours",
+    },
+    "cross_country_skiing": {
+        "min_snow_depth_in",
+        "min_temperature_f",
+        "max_temperature_f",
+        "max_wind_mph",
+        "max_precipitation_probability_pct",
+        "max_rain_in",
+        "min_run_hours",
+    },
+}
+
+_SKIING_RENAMED = (
+    "{where}: 'skiing' was renamed; use 'downhill_skiing' or 'cross_country_skiing'"
+)
+
+
+def _downhill(block: dict[str, Any]) -> DownhillSkiingThresholds:
+    where = "thresholds.downhill_skiing"
+    return DownhillSkiingThresholds(
+        max_temperature_f=_threshold_number(block, "max_temperature_f", where),
+        max_wind_mph=_threshold_number(block, "max_wind_mph", where, minimum=0),
+        min_snowfall_in=_threshold_number(block, "min_snowfall_in", where, minimum=0),
+        min_snow_depth_in=_threshold_number(
+            block, "min_snow_depth_in", where, minimum=0
+        ),
+        min_run_hours=_run_hours(block, where),
+    )
+
+
+def _cross_country(block: dict[str, Any]) -> CrossCountrySkiingThresholds:
+    where = "thresholds.cross_country_skiing"
+    min_temperature = _threshold_number(block, "min_temperature_f", where)
+    max_temperature = _threshold_number(block, "max_temperature_f", where)
+    if min_temperature >= max_temperature:
+        raise ConfigError(
+            f"{where}.min_temperature_f ({min_temperature:g}) must be below "
+            f"{where}.max_temperature_f ({max_temperature:g})"
+        )
+    return CrossCountrySkiingThresholds(
+        min_snow_depth_in=_threshold_number(
+            block, "min_snow_depth_in", where, minimum=0
+        ),
+        min_temperature_f=min_temperature,
+        max_temperature_f=max_temperature,
+        max_wind_mph=_threshold_number(block, "max_wind_mph", where, minimum=0),
+        max_precipitation_probability_pct=_threshold_number(
+            block, "max_precipitation_probability_pct", where, minimum=0, maximum=100
+        ),
+        max_rain_in=_threshold_number(block, "max_rain_in", where, minimum=0),
+        min_run_hours=_run_hours(block, where),
+    )
 
 
 def _threshold_block(
@@ -215,6 +260,8 @@ def _parse_spot(index: int, item: object) -> Spot:
         raise ConfigError(f"{where}.lon out of range: {lon}")
 
     activities = item.get("activities")
+    if isinstance(activities, list) and "skiing" in activities:
+        raise ConfigError(_SKIING_RENAMED.replace("{where}", f"{where}.activities"))
     valid = get_args(Activity)
     if (
         not isinstance(activities, list)

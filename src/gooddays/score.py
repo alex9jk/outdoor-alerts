@@ -19,11 +19,12 @@ from gooddays.models import (
     ActivityScore,
     Alert,
     CheckResult,
+    CrossCountrySkiingThresholds,
     DaylightWindow,
+    DownhillSkiingThresholds,
     HikingThresholds,
     HourlyConditions,
     ScoreResult,
-    SkiingThresholds,
     SpotConditions,
     SpotScore,
     Thresholds,
@@ -65,8 +66,18 @@ def _score_spot(
         for day in days:
             if activity == "hiking":
                 scores.append(_score_hiking(conditions, day, thresholds.hiking, tz))
-            elif activity == "skiing":
-                scores.append(_score_skiing(conditions, day, thresholds.skiing, tz))
+            elif activity == "downhill_skiing":
+                scores.append(
+                    _score_downhill_skiing(
+                        conditions, day, thresholds.downhill_skiing, tz
+                    )
+                )
+            elif activity == "cross_country_skiing":
+                scores.append(
+                    _score_cross_country_skiing(
+                        conditions, day, thresholds.cross_country_skiing, tz
+                    )
+                )
             else:
                 scores.append(
                     ActivityScore(activity, day, "no_rules", (), (), ("no rules yet",))
@@ -77,7 +88,6 @@ def _score_spot(
 def _score_hiking(
     conditions: SpotConditions, day: date, t: HikingThresholds, tz: ZoneInfo
 ) -> ActivityScore:
-    window = _daylight(conditions, day, tz)
     rules = [
         _Rule(
             "temperature_f",
@@ -98,6 +108,64 @@ def _score_hiking(
             f"<= {t.max_precipitation_in:g} in per hour",
         ),
     ]
+    return _score_daylight_run("hiking", conditions, day, tz, rules, t.min_run_hours)
+
+
+def _score_cross_country_skiing(
+    conditions: SpotConditions,
+    day: date,
+    t: CrossCountrySkiingThresholds,
+    tz: ZoneInfo,
+) -> ActivityScore:
+    # Depth on the ground matters here, so it is an hourly rule (unlike downhill's
+    # "any snow" check), and fresh snow overnight is not required.
+    rules = [
+        _Rule(
+            "snow_depth_in",
+            lambda h: h.snow_depth_in,
+            lambda v: v >= t.min_snow_depth_in,
+            f">= {t.min_snow_depth_in:g} in",
+        ),
+        _Rule(
+            "temperature_f",
+            lambda h: h.temperature_f,
+            lambda v: t.min_temperature_f <= v < t.max_temperature_f,
+            f">= {t.min_temperature_f:g} and < {t.max_temperature_f:g} F",
+        ),
+        _Rule(
+            "wind_speed_mph",
+            lambda h: h.wind_speed_mph,
+            lambda v: v < t.max_wind_mph,
+            f"< {t.max_wind_mph:g} mph",
+        ),
+        _Rule(
+            "precipitation_probability_pct",
+            lambda h: h.precipitation_probability_pct,
+            lambda v: v <= t.max_precipitation_probability_pct,
+            f"<= {t.max_precipitation_probability_pct:g} %",
+        ),
+        _Rule(
+            "rain_in",
+            lambda h: h.rain_in,
+            lambda v: v <= t.max_rain_in,
+            f"<= {t.max_rain_in:g} in per hour",
+        ),
+    ]
+    return _score_daylight_run(
+        "cross_country_skiing", conditions, day, tz, rules, t.min_run_hours
+    )
+
+
+def _score_daylight_run(
+    activity: Activity,
+    conditions: SpotConditions,
+    day: date,
+    tz: ZoneInfo,
+    rules: list[_Rule],
+    min_run_hours: int,
+) -> ActivityScore:
+    """Score an activity that only needs good daylight hours (no overnight check)."""
+    window = _daylight(conditions, day, tz)
     checks: list[CheckResult] = []
     early: list[str] = []
     if window is None:
@@ -106,15 +174,15 @@ def _score_hiking(
     else:
         checks.extend(
             _hourly_checks(
-                conditions, window.sunrise, window.sunset, rules, t.min_run_hours
+                conditions, window.sunrise, window.sunset, rules, min_run_hours
             )
         )
         alert_start = window.sunrise
-    return _finish("hiking", conditions, day, checks, early, alert_start)
+    return _finish(activity, conditions, day, checks, early, alert_start)
 
 
-def _score_skiing(
-    conditions: SpotConditions, day: date, t: SkiingThresholds, tz: ZoneInfo
+def _score_downhill_skiing(
+    conditions: SpotConditions, day: date, t: DownhillSkiingThresholds, tz: ZoneInfo
 ) -> ActivityScore:
     window = _daylight(conditions, day, tz)
     rules = [
@@ -153,7 +221,7 @@ def _score_skiing(
         )
         checks.append(_snow_check(conditions, window, overnight_start, t))
         alert_start = overnight_start
-    return _finish("skiing", conditions, day, checks, early, alert_start)
+    return _finish("downhill_skiing", conditions, day, checks, early, alert_start)
 
 
 def _finish(
@@ -283,7 +351,7 @@ def _snow_check(
     conditions: SpotConditions,
     window: DaylightWindow,
     overnight_start: datetime,
-    t: SkiingThresholds,
+    t: DownhillSkiingThresholds,
 ) -> CheckResult:
     """Snow is required: it snowed overnight, or there is snow on the ground."""
     overnight = [

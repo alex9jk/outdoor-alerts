@@ -21,6 +21,9 @@ from gooddays.models import (
     SpotError,
 )
 
+# Wide enough for the longest activity name (cross_country_skiing).
+ACTIVITY_WIDTH = 20
+
 
 def to_json(result: FetchResult) -> str:
     """Everything in the result. `alerts` is null if unknown, [] if none active."""
@@ -50,7 +53,7 @@ def score_to_text(scores: ScoreResult, errors: Sequence[SpotError]) -> str:
     for spot_score in scores.results:
         lines.append(f"{spot_score.spot.name} ({spot_score.spot.id})")
         for score in spot_score.scores:
-            heading = f"  {score.day}  {score.activity:<7}"
+            heading = f"  {score.day}  {score.activity:<{ACTIVITY_WIDTH}}"
             if score.status == "no_rules":
                 lines.append(f"{heading} no rules yet")
                 continue

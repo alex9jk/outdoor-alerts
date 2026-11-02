@@ -26,11 +26,19 @@ thresholds:
     max_precipitation_probability_pct: 30
     max_precipitation_in: 0.1
     min_run_hours: 4
-  skiing:
+  downhill_skiing:
     max_temperature_f: 32
     max_wind_mph: 10
     min_snowfall_in: 0
     min_snow_depth_in: 0
+    min_run_hours: 4
+  cross_country_skiing:
+    min_snow_depth_in: 5
+    min_temperature_f: 10
+    max_temperature_f: 32
+    max_wind_mph: 10
+    max_precipitation_probability_pct: 30
+    max_rain_in: 0
     min_run_hours: 4
 """
 
@@ -40,7 +48,7 @@ settings:
   timezone: America/New_York
 spots:
   - {id: spot-0, name: Spot 0, lat: 40.0, lon: -75.0, activities: [hiking]}
-  - {id: spot-1, name: Spot 1, lat: 41.0, lon: -75.0, activities: [skiing]}
+  - {id: spot-1, name: Spot 1, lat: 41.0, lon: -75.0, activities: [downhill_skiing]}
 """
     + THRESHOLDS_YAML
 )
@@ -500,6 +508,10 @@ def test_runs_as_a_module() -> None:
 # --- score ---
 
 
+def row(day: str, activity: str, status: str) -> str:
+    return f"  {day}  {activity:<20} {status}"
+
+
 def write_warm_dry_run(folder: Path) -> Path:
     """A saved run of the warm, dry June 15-16 fixture, fetched early on June 15."""
     write_saved_run(folder)
@@ -522,9 +534,9 @@ def test_score_from_a_saved_folder_without_the_network(
 
     out = capsys.readouterr().out
     assert "Spot 0 (spot-0)" in out
-    assert "  2026-06-15  hiking  GOOD" in out
-    assert "  2026-06-16  hiking  GOOD" in out
-    assert "  2026-06-15  skiing  NOT GOOD" in out  # warm, no snow
+    assert row("2026-06-15", "hiking", "GOOD") in out
+    assert row("2026-06-16", "hiking", "GOOD") in out
+    assert row("2026-06-15", "downhill_skiing", "NOT GOOD") in out  # warm, no snow
     assert "snow: no snow overnight and none on the ground" in out
     assert out.rstrip().endswith("2 spot(s) scored, 2 good day(s), 0 error(s)")
 
@@ -576,7 +588,7 @@ def test_score_alerts_unknown_means_not_good(
     assert main(["score", "--fixtures", str(folder)]) == 0
 
     out = capsys.readouterr().out
-    assert "  2026-06-15  hiking  NOT GOOD" in out
+    assert row("2026-06-15", "hiking", "NOT GOOD") in out
     assert "alerts: unknown" in out
 
 
@@ -593,8 +605,16 @@ def test_score_live_fetches_then_scores(capsys: pytest.CaptureFixture[str]) -> N
 @pytest.mark.parametrize(
     ("old", "new", "message"),
     [
-        ("min_run_hours: 4\n  skiing", "min_run_hours: 0\n  skiing", "min_run_hours"),
-        ("max_wind_mph: 10", "max_wind_mph: fast", "thresholds.skiing.max_wind_mph"),
+        (
+            "min_run_hours: 4\n  downhill_skiing",
+            "min_run_hours: 0\n  skiing",
+            "min_run_hours",
+        ),
+        (
+            "max_wind_mph: 10",
+            "max_wind_mph: fast",
+            "thresholds.downhill_skiing.max_wind_mph",
+        ),
     ],
 )
 def test_score_with_bad_thresholds_exits_2_naming_the_field(
@@ -678,3 +698,110 @@ def test_score_runs_as_a_module(project: Path) -> None:
     assert done.returncode == 0
     assert len(json.loads(done.stdout)["scores"]) == 2
     assert "level=INFO" in done.stderr
+
+
+def xc_saved_run(folder: Path) -> Path:
+    """A saved run of one cold, snowy, calm, dry day for a cross-country spot."""
+    data = load_fixture("open_meteo_warm_dry.json")
+    n = len(data["hourly"]["time"])
+    data["hourly"]["temperature_2m"] = [20.0] * n
+    data["hourly"]["snow_depth"] = [0.5] * n  # feet: 6 inches
+    data["hourly"]["rain"] = [0.0] * n
+    (folder / "spot-x").mkdir(parents=True)
+    (folder / "spot-x" / "open_meteo.json").write_text(json.dumps(data))
+    (folder / "spot-x" / "nws.json").write_text(
+        json.dumps(load_fixture("nws_alerts_none.json"))
+    )
+    (folder / "meta.json").write_text(
+        json.dumps({"fetched_at": "2026-06-15T04:00:00-04:00"})
+    )
+    return folder
+
+
+CROSS_COUNTRY_SPOTS_YAML = (
+    """
+settings:
+  timezone: America/New_York
+spots:
+  - {id: spot-x, name: Spot X, lat: 40.0, lon: -75.0, activities: [hiking, cross_country_skiing]}
+"""
+    + THRESHOLDS_YAML
+)
+
+
+def test_score_includes_cross_country_skiing(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (project / "spots.yaml").write_text(CROSS_COUNTRY_SPOTS_YAML)
+    folder = xc_saved_run(project / "saved")
+
+    assert main(["score", "--fixtures", str(folder)]) == 0
+
+    out = capsys.readouterr().out
+    assert row("2026-06-15", "cross_country_skiing", "GOOD") in out
+    assert row("2026-06-15", "hiking", "NOT GOOD") in out  # too cold to hike
+    assert (
+        "temperature_f: 0/"
+        not in out.split("cross_country_skiing")[1].split("hiking")[0]
+    )
+
+
+def test_score_json_labels_activities_with_the_config_key(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (project / "spots.yaml").write_text(CROSS_COUNTRY_SPOTS_YAML)
+    folder = xc_saved_run(project / "saved")
+
+    assert main(["score", "--fixtures", str(folder), "--json"]) == 0
+
+    data = json.loads(capsys.readouterr().out)
+    activities = {s["activity"] for s in data["scores"][0]["scores"]}
+    assert activities == {"hiking", "cross_country_skiing"}
+    xc = [
+        s
+        for s in data["scores"][0]["scores"]
+        if s["activity"] == "cross_country_skiing"
+    ]
+    assert {c["name"] for c in xc[0]["checks"]} >= {
+        "snow_depth_in",
+        "rain_in",
+        "temperature_f",
+    }
+
+
+def test_old_skiing_activity_in_config_exits_2(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (project / "spots.yaml").write_text(
+        SPOTS_YAML.replace("[downhill_skiing]", "[skiing]")
+    )
+
+    assert main(["score"]) == 2
+
+    assert "'skiing' was renamed" in capsys.readouterr().err
+
+
+def test_old_skiing_thresholds_block_exits_2(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (project / "spots.yaml").write_text(
+        SPOTS_YAML.replace("  downhill_skiing:\n", "  skiing:\n")
+    )
+
+    assert main(["score"]) == 2
+
+    assert "thresholds: 'skiing' was renamed" in capsys.readouterr().err
+
+
+def test_a_temperature_window_with_no_room_exits_2(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (project / "spots.yaml").write_text(
+        SPOTS_YAML.replace("min_temperature_f: 10", "min_temperature_f: 32")
+    )
+
+    assert main(["score"]) == 2
+
+    assert "must be below thresholds.cross_country_skiing.max_temperature_f" in (
+        capsys.readouterr().err
+    )

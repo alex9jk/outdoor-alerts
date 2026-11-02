@@ -5,7 +5,11 @@ from typing import Any
 import pytest
 import yaml
 
-from gooddays.models import HikingThresholds, SkiingThresholds
+from gooddays.models import (
+    CrossCountrySkiingThresholds,
+    DownhillSkiingThresholds,
+    HikingThresholds,
+)
 from gooddays.storage import USER_AGENT_ENV_VAR, ConfigError, LocalStorage
 
 SETTINGS = """
@@ -42,13 +46,13 @@ def spot_with(**overrides: str) -> str:
 
 
 def test_loads_settings_and_spots(tmp_path: Path) -> None:
-    storage = write(tmp_path, VALID.replace("[hiking]", "[hiking, skiing]"))
+    storage = write(tmp_path, VALID.replace("[hiking]", "[hiking, downhill_skiing]"))
     settings = storage.get_settings()
     assert settings.timezone == "America/New_York"
     assert settings.nws_user_agent == "test (test@example.com)"
     (spot,) = storage.get_spots()
     assert spot.id == "a"
-    assert spot.activities == ("hiking", "skiing")
+    assert spot.activities == ("hiking", "downhill_skiing")
 
 
 def test_repo_spots_yaml_is_valid(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -208,11 +212,20 @@ THRESHOLDS_DICT: dict[str, Any] = {
         "max_precipitation_in": 0.1,
         "min_run_hours": 4,
     },
-    "skiing": {
+    "downhill_skiing": {
         "max_temperature_f": 32,
         "max_wind_mph": 10,
         "min_snowfall_in": 0,
         "min_snow_depth_in": 0,
+        "min_run_hours": 4,
+    },
+    "cross_country_skiing": {
+        "min_snow_depth_in": 5,
+        "min_temperature_f": 10,
+        "max_temperature_f": 32,
+        "max_wind_mph": 10,
+        "max_precipitation_probability_pct": 30,
+        "max_rain_in": 0,
         "min_run_hours": 4,
     },
 }
@@ -242,7 +255,7 @@ def test_loads_thresholds(tmp_path: Path) -> None:
     thresholds = write_thresholds(tmp_path, THRESHOLDS_DICT).get_thresholds()
 
     assert thresholds.hiking == HikingThresholds(45, 30, 0.1, 4)
-    assert thresholds.skiing == SkiingThresholds(32, 10, 0, 0, 4)
+    assert thresholds.downhill_skiing == DownhillSkiingThresholds(32, 10, 0, 0, 4)
 
 
 def test_repo_spots_yaml_thresholds_are_valid() -> None:
@@ -251,7 +264,7 @@ def test_repo_spots_yaml_thresholds_are_valid() -> None:
     thresholds = storage.get_thresholds()
 
     assert thresholds.hiking.min_temperature_f == 45
-    assert thresholds.skiing.max_temperature_f == 32
+    assert thresholds.downhill_skiing.max_temperature_f == 32
 
 
 @pytest.mark.parametrize(
@@ -260,17 +273,17 @@ def test_repo_spots_yaml_thresholds_are_valid() -> None:
         (None, "missing 'thresholds'"),
         ("hiking", "missing 'thresholds'"),
         (with_change(["hiking"], ...), "missing 'thresholds.hiking'"),
-        (with_change(["skiing"], ...), "missing 'thresholds.skiing'"),
+        (with_change(["downhill_skiing"], ...), "missing 'thresholds.downhill_skiing'"),
         (
             with_change(["hiking", "min_temperature_f"], ...),
             "hiking.min_temperature_f must be a number",
         ),
         (
-            with_change(["skiing", "max_wind_mph"], ...),
+            with_change(["downhill_skiing", "max_wind_mph"], ...),
             "skiing.max_wind_mph must be a number",
         ),
         (
-            with_change(["skiing", "min_snow_depth_in"], ...),
+            with_change(["downhill_skiing", "min_snow_depth_in"], ...),
             "min_snow_depth_in must be a number",
         ),
         (
@@ -294,9 +307,9 @@ def test_repo_spots_yaml_thresholds_are_valid() -> None:
             "at least 0",
         ),
         (with_change(["hiking", "max_precipitation_in"], -0.1), "at least 0"),
-        (with_change(["skiing", "max_wind_mph"], -1), "at least 0"),
-        (with_change(["skiing", "min_snowfall_in"], -1), "at least 0"),
-        (with_change(["skiing", "min_snow_depth_in"], -1), "at least 0"),
+        (with_change(["downhill_skiing", "max_wind_mph"], -1), "at least 0"),
+        (with_change(["downhill_skiing", "min_snowfall_in"], -1), "at least 0"),
+        (with_change(["downhill_skiing", "min_snow_depth_in"], -1), "at least 0"),
         (
             with_change(["hiking", "min_run_hours"], ...),
             "min_run_hours must be a whole number",
@@ -306,11 +319,11 @@ def test_repo_spots_yaml_thresholds_are_valid() -> None:
             "min_run_hours must be a whole number",
         ),
         (
-            with_change(["skiing", "min_run_hours"], 2.5),
+            with_change(["downhill_skiing", "min_run_hours"], 2.5),
             "min_run_hours must be a whole number",
         ),
         (
-            with_change(["skiing", "min_run_hours"], True),
+            with_change(["downhill_skiing", "min_run_hours"], True),
             "min_run_hours must be a whole number",
         ),
         (with_change(["hiking", "min_temperatur_f"], 45), "unknown key"),
@@ -342,3 +355,143 @@ def test_unknown_activity_thresholds_are_refused(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match=r"unknown activities: \['surfing'\]"):
         write_thresholds(tmp_path, changed).get_thresholds()
+
+
+# --- cross-country skiing thresholds and the skiing rename ---
+
+
+def test_loads_cross_country_thresholds(tmp_path: Path) -> None:
+    thresholds = write_thresholds(tmp_path, THRESHOLDS_DICT).get_thresholds()
+
+    assert thresholds.cross_country_skiing == CrossCountrySkiingThresholds(
+        min_snow_depth_in=5,
+        min_temperature_f=10,
+        max_temperature_f=32,
+        max_wind_mph=10,
+        max_precipitation_probability_pct=30,
+        max_rain_in=0,
+        min_run_hours=4,
+    )
+
+
+XC = "cross_country_skiing"
+
+
+@pytest.mark.parametrize(
+    ("thresholds", "message"),
+    [
+        (with_change([XC], ...), f"missing 'thresholds.{XC}'"),
+        (
+            with_change([XC, "min_snow_depth_in"], ...),
+            "min_snow_depth_in must be a number",
+        ),
+        (
+            with_change([XC, "min_temperature_f"], ...),
+            "min_temperature_f must be a number",
+        ),
+        (
+            with_change([XC, "max_temperature_f"], ...),
+            "max_temperature_f must be a number",
+        ),
+        (with_change([XC, "max_wind_mph"], ...), "max_wind_mph must be a number"),
+        (with_change([XC, "max_rain_in"], ...), "max_rain_in must be a number"),
+        (
+            with_change([XC, "max_precipitation_probability_pct"], ...),
+            "max_precipitation_probability_pct must be a number",
+        ),
+        (
+            with_change([XC, "min_snow_depth_in"], "deep"),
+            "min_snow_depth_in must be a number",
+        ),
+        (with_change([XC, "max_wind_mph"], True), "max_wind_mph must be a number"),
+        (with_change([XC, "min_snow_depth_in"], -1), "at least 0"),
+        (with_change([XC, "max_wind_mph"], -1), "at least 0"),
+        (with_change([XC, "max_rain_in"], -0.1), "at least 0"),
+        (with_change([XC, "max_precipitation_probability_pct"], 101), "at most 100"),
+        (
+            with_change([XC, "min_temperature_f"], float("inf")),
+            "must be a finite number",
+        ),
+        (with_change([XC, "min_run_hours"], 0), "min_run_hours must be a whole number"),
+        (
+            with_change([XC, "min_run_hours"], ...),
+            "min_run_hours must be a whole number",
+        ),
+        (with_change([XC, "max_snowfall_in"], 1), "unknown key"),
+    ],
+)
+def test_invalid_cross_country_thresholds(
+    tmp_path: Path, thresholds: Any, message: str
+) -> None:
+    with pytest.raises(ConfigError, match=message):
+        write_thresholds(tmp_path, thresholds).get_thresholds()
+
+
+@pytest.mark.parametrize(("low", "high"), [(32, 32), (40, 32), (10, 10)])
+def test_min_temperature_must_be_below_max_temperature(
+    tmp_path: Path, low: float, high: float
+) -> None:
+    changed = with_change([XC, "min_temperature_f"], low)
+    changed[XC]["max_temperature_f"] = high
+
+    with pytest.raises(ConfigError) as exc:
+        write_thresholds(tmp_path, changed).get_thresholds()
+
+    message = str(exc.value)
+    assert "thresholds.cross_country_skiing.min_temperature_f" in message
+    assert "must be below thresholds.cross_country_skiing.max_temperature_f" in message
+
+
+def test_a_temperature_window_with_room_is_accepted(tmp_path: Path) -> None:
+    changed = with_change([XC, "min_temperature_f"], 31.9)
+
+    thresholds = write_thresholds(tmp_path, changed).get_thresholds()
+
+    assert thresholds.cross_country_skiing.min_temperature_f == 31.9
+
+
+def test_the_old_skiing_thresholds_block_gives_a_rename_error(tmp_path: Path) -> None:
+    changed = {**THRESHOLDS_DICT, "skiing": THRESHOLDS_DICT["downhill_skiing"]}
+
+    with pytest.raises(
+        ConfigError, match="'skiing' was renamed; use 'downhill_skiing'"
+    ):
+        write_thresholds(tmp_path, changed).get_thresholds()
+
+
+def test_the_old_skiing_activity_on_a_spot_gives_a_rename_error(tmp_path: Path) -> None:
+    text = VALID.replace("[hiking]", "[hiking, skiing]")
+
+    with pytest.raises(ConfigError) as exc:
+        write(tmp_path, text).get_spots()
+
+    message = str(exc.value)
+    assert "spots[0].activities" in message
+    assert "'skiing' was renamed" in message
+    assert "'downhill_skiing' or 'cross_country_skiing'" in message
+
+
+def test_spots_can_list_either_skiing_activity(tmp_path: Path) -> None:
+    text = SETTINGS + (
+        "spots:\n"
+        "  - {id: a, name: A, lat: 1, lon: 1, activities: [downhill_skiing]}\n"
+        "  - {id: b, name: B, lat: 1, lon: 1, activities: [hiking, cross_country_skiing]}\n"
+    )
+
+    spots = write(tmp_path, text).get_spots()
+
+    assert [s.activities for s in spots] == [
+        ("downhill_skiing",),
+        ("hiking", "cross_country_skiing"),
+    ]
+
+
+def test_repo_spots_yaml_activities() -> None:
+    spots = {
+        s.id: s.activities
+        for s in LocalStorage(Path(__file__).parent.parent / "spots.yaml").get_spots()
+    }
+
+    assert spots["harriet-hollister-park"] == ("hiking", "cross_country_skiing")
+    assert spots["bristol-mountain"] == ("downhill_skiing",)
+    assert all("skiing" not in activities for activities in spots.values())

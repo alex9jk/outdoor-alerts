@@ -10,13 +10,14 @@ settings:
 
 # Limits for scoring each day (score_conditions). Hourly checks run over daylight
 # hours; a day passes when at least min_run_hours consecutive hours pass them all.
+# Downhill skiing also requires snow (see below); cross-country does not need fresh snow.
 thresholds:
   hiking:
     min_temperature_f: 45                    # an hour passes at or above this
     max_precipitation_probability_pct: 30    # at or below this
     max_precipitation_in: 0.1                # per hour, at or below this
     min_run_hours: 4
-  skiing:
+  downhill_skiing:
     max_temperature_f: 32                    # an hour passes below this
     max_wind_mph: 10                         # below this
     # Snow is required: overnight snowfall above min_snowfall_in, OR snow on the
@@ -24,31 +25,39 @@ thresholds:
     min_snowfall_in: 0
     min_snow_depth_in: 0                     # placeholder: tune for your mountains
     min_run_hours: 4
+  cross_country_skiing:
+    min_snow_depth_in: 5                     # an hour passes at or above this depth
+    min_temperature_f: 10                    # at or above this, and ...
+    max_temperature_f: 32                    # ... below this (min must be below max)
+    max_wind_mph: 10                         # below this
+    max_precipitation_probability_pct: 30    # at or below this
+    max_rain_in: 0                           # liquid rain per hour; 0 means any rain fails
+    min_run_hours: 4
 
 spots:
   - id: bristol-mountain     # unique, stable slug; used in logs and data/raw paths
     name: Bristol Mountain
     lat: 42.745
     lon: -77.404
-    activities: [skiing]    # any of: hiking, biking, skiing
+    activities: [downhill_skiing]    # any of: hiking, biking, downhill_skiing, cross_country_skiing
 
   - id: gore-mountain
     name: Gore Mountain
     lat: 43.6825
     lon: -73.9917
-    activities: [skiing]
+    activities: [downhill_skiing]
 
   - id: whiteface-mountain
     name: Whiteface Mountain
     lat: 44.365865
     lon: -73.903139
-    activities: [skiing]
+    activities: [downhill_skiing]
 
   - id: stowe-mountain
     name: Stowe Mountain
     lat: 44.5006
     lon: -72.7183
-    activities: [skiing]
+    activities: [downhill_skiing]
 
   - id: mendon-ponds-park 
     name: Mendon Ponds Park
@@ -60,7 +69,7 @@ spots:
     name: Harriet Hollister Park
     lat: 42.689
     lon: -77.512
-    activities: [hiking,skiing]
+    activities: [hiking, cross_country_skiing]
 
   - id: boughton-park
     name: Boughton. Park

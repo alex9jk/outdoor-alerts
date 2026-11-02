@@ -2,7 +2,7 @@
 
 ## Project context
 "Is it a good day?" is a personal app that checks weather conditions for my favorite
-outdoor spots (hiking, biking, skiing) and alerts me when a day looks good.
+outdoor spots (hiking, biking, downhill and cross-country skiing) and alerts me when a day looks good.
 
 The pipeline has four stages:
 `fetch_conditions` → `score_conditions` → `generate_message` → `send_notification`
@@ -46,7 +46,7 @@ spots.yaml
 **For each spot:**
 1. Call Open-Meteo for a 2-day forecast:
    - hourly: `temperature_2m`, `precipitation_probability`, `precipitation`,
-     `wind_speed_10m`, `wind_gusts_10m`, `snowfall`, `snow_depth`, `weather_code`
+     `wind_speed_10m`, `wind_gusts_10m`, `snowfall`, `snow_depth`, `rain`, `weather_code`
    - daily: `sunrise`, `sunset`
    - units: `temperature_unit=fahrenheit`, `wind_speed_unit=mph`,
      `precipitation_unit=inch`, `length_unit=imperial` (snow depth comes back in
@@ -71,16 +71,25 @@ only printed; nothing is stored or sent.
 - **Hourly checks** run over daylight hours (sunrise to sunset). A day passes when a run of
   at least `min_run_hours` consecutive hours passes every check.
   - Hiking: temperature >= min, rain probability <= max, rain amount <= max per hour.
-  - Skiing: temperature < max and wind < max, in daylight hours.
-- **Skiing snow is required**: overnight snowfall > `min_snowfall_in` (overnight = from the
+  - Downhill skiing (`downhill_skiing`): temperature < max and wind < max, in daylight hours.
+  - Cross-country skiing (`cross_country_skiing`): snow depth >= min, min <= temperature < max,
+    wind < max, rain probability <= max, and liquid rain (`rain`) <= max per hour (0 means any
+    rain fails), in daylight hours. Fresh snow overnight is NOT required, and snow depth is an
+    hourly rule. The config requires min temperature to be below max temperature.
+- **Downhill snow is required**: overnight snowfall > `min_snowfall_in` (overnight = from the
   previous sunset, or the start of the data for today, to sunrise) OR snow depth on the
-  ground > `min_snow_depth_in`. Weather codes don't count.
+  ground > `min_snow_depth_in`. Weather codes don't count. (Open-Meteo's depth is modeled
+  natural snow, not a resort's reported base.)
 - **Alerts**: unknown alerts (`alerts=None`) never pass. Severe and Extreme alerts that
   are still active fail every activity; other severities are listed as notes. An alert
-  that ends at or before the window start is over.
+  that ends at or before the window start is over. The alert window starts at sunrise,
+  except downhill skiing, where it starts overnight.
 - **Missing data** never passes: a missing value fails its check, a day with no daylight
   window or no hourly rows is "no data", and today only counts the hours from the fetch time.
 - Compare times through UTC: same-zone datetimes compare by wall clock, wrong across DST.
+
+- The old activity name `skiing` was renamed to `downhill_skiing`; `skiing` in config is a
+  ConfigError that says so.
 
 ## Rules
 - **No scoring or judgment in the fetch stage.** This stage only fetches and normalizes.

@@ -13,6 +13,7 @@ HOURLY_VARIABLES = (
     "temperature_2m",
     "precipitation_probability",
     "precipitation",
+    "rain",
     "wind_speed_10m",
     "wind_gusts_10m",
     "snowfall",

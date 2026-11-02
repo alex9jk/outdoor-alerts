@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Literal
 
-Activity = Literal["hiking", "biking", "skiing"]
+Activity = Literal["hiking", "biking", "downhill_skiing", "cross_country_skiing"]
 
 # Spot ids end up in log lines and data/raw/{date}/{spot_id}/ paths.
 SPOT_ID_PATTERN = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
@@ -38,7 +38,8 @@ class HourlyConditions:
     time: datetime
     temperature_f: float | None
     precipitation_probability_pct: int | None
-    precipitation_in: float | None
+    precipitation_in: float | None  # rain plus melted snow
+    rain_in: float | None  # liquid rain only (not snow, not snow showers)
     wind_speed_mph: float | None
     wind_gust_mph: float | None
     snowfall_in: float | None
@@ -97,7 +98,7 @@ class HikingThresholds:
 
 
 @dataclass(frozen=True, slots=True)
-class SkiingThresholds:
+class DownhillSkiingThresholds:
     max_temperature_f: float  # an hour passes below this
     max_wind_mph: float  # below this
     min_snowfall_in: float  # an overnight hour counts as snowing above this
@@ -106,9 +107,21 @@ class SkiingThresholds:
 
 
 @dataclass(frozen=True, slots=True)
+class CrossCountrySkiingThresholds:
+    min_snow_depth_in: float  # an hour passes at or above this depth on the ground
+    min_temperature_f: float  # at or above this ...
+    max_temperature_f: float  # ... and below this
+    max_wind_mph: float  # below this
+    max_precipitation_probability_pct: float  # at or below this
+    max_rain_in: float  # liquid rain per hour, at or below this (0 = no rain)
+    min_run_hours: int  # consecutive passing daylight hours needed
+
+
+@dataclass(frozen=True, slots=True)
 class Thresholds:
     hiking: HikingThresholds
-    skiing: SkiingThresholds
+    downhill_skiing: DownhillSkiingThresholds
+    cross_country_skiing: CrossCountrySkiingThresholds
 
 
 ScoreStatus = Literal["good", "not_good", "no_rules"]

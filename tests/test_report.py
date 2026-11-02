@@ -23,7 +23,7 @@ SPOT = Spot(
     name="Bristol",
     lat=42.745,
     lon=-77.404,
-    activities=("skiing", "hiking"),
+    activities=("downhill_skiing", "hiking"),
 )
 
 
@@ -122,7 +122,7 @@ def test_json_structure_and_iso_datetimes() -> None:
         "name": "Bristol",
         "lat": 42.745,
         "lon": -77.404,
-        "activities": ["skiing", "hiking"],
+        "activities": ["downhill_skiing", "hiking"],
     }
     assert spot_json["fetched_at"] == "2026-06-15T12:00:00+00:00"
     assert spot_json["hourly"][0]["time"] == "2026-06-15T09:00:00-04:00"
@@ -193,7 +193,7 @@ def score_result() -> ScoreResult:
         (),
     )
     skiing = ActivityScore(
-        "skiing",
+        "downhill_skiing",
         day,
         "not_good",
         (CheckResult("snow", False, "no data", "snowfall > 0 in"),),
@@ -210,16 +210,20 @@ def score_result() -> ScoreResult:
     )
 
 
+def row(day: str, activity: str, status: str) -> str:
+    return f"  {day}  {activity:<20} {status}"
+
+
 def test_score_text_shows_status_reasons_and_notes() -> None:
     text = score_to_text(score_result(), [])
 
     assert text.splitlines() == [
         "Bristol (bristol)",
-        "  2026-01-15  hiking  GOOD",
-        "  2026-01-15  skiing  NOT GOOD",
+        row("2026-01-15", "hiking", "GOOD"),
+        row("2026-01-15", "downhill_skiing", "NOT GOOD"),
         "      - snow: no data (needs snowfall > 0 in)",
         "      alert: Wind Advisory (Moderate)",
-        "  2026-01-15  biking  no rules yet",
+        row("2026-01-15", "biking", "no rules yet"),
         "",
         "1 spot(s) scored, 1 good day(s), 0 error(s)",
     ]
@@ -273,3 +277,19 @@ def test_score_json_has_every_check_with_value_and_limit() -> None:
             "status_code": 503,
         }
     ]
+
+
+def test_score_text_columns_line_up_for_the_longest_activity_name() -> None:
+    day = date(2026, 1, 15)
+    scores = (
+        ActivityScore("hiking", day, "good", (), (), ()),
+        ActivityScore("cross_country_skiing", day, "good", (), (), ()),
+    )
+    result = ScoreResult(
+        results=(SpotScore(SPOT, datetime(2026, 1, 15, 12, tzinfo=UTC), scores),)
+    )
+
+    _, short, long = score_to_text(result, []).splitlines()[:3]
+
+    assert short.index("GOOD") == long.index("GOOD")
+    assert "cross_country_skiing GOOD" in long

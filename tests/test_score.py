@@ -9,10 +9,11 @@ from gooddays.fetch.service import normalize_alerts, normalize_forecast
 from gooddays.models import (
     ActivityScore,
     Alert,
+    CrossCountrySkiingThresholds,
     DaylightWindow,
+    DownhillSkiingThresholds,
     HikingThresholds,
     HourlyConditions,
-    SkiingThresholds,
     Spot,
     SpotConditions,
     Thresholds,
@@ -22,6 +23,15 @@ from helpers import load_fixture
 
 TZ = "America/New_York"
 ET = ZoneInfo(TZ)
+XC_THRESHOLDS = CrossCountrySkiingThresholds(
+    min_snow_depth_in=5,
+    min_temperature_f=10,
+    max_temperature_f=32,
+    max_wind_mph=10,
+    max_precipitation_probability_pct=30,
+    max_rain_in=0,
+    min_run_hours=4,
+)
 THRESHOLDS = Thresholds(
     hiking=HikingThresholds(
         min_temperature_f=45,
@@ -29,13 +39,14 @@ THRESHOLDS = Thresholds(
         max_precipitation_in=0.1,
         min_run_hours=4,
     ),
-    skiing=SkiingThresholds(
+    downhill_skiing=DownhillSkiingThresholds(
         max_temperature_f=32,
         max_wind_mph=10,
         min_snowfall_in=0,
         min_snow_depth_in=0,
         min_run_hours=4,
     ),
+    cross_country_skiing=XC_THRESHOLDS,
 )
 
 TODAY = date(2026, 1, 15)
@@ -47,6 +58,7 @@ GOOD_HOUR: dict[str, Any] = {
     "temperature_f": 60.0,
     "precipitation_probability_pct": 10,
     "precipitation_in": 0.0,
+    "rain_in": 0.0,
     "wind_speed_mph": 5.0,
     "wind_gust_mph": 9.0,
     "snowfall_in": 0.0,
@@ -74,7 +86,7 @@ def build(
     *,
     base: dict[str, Any] = GOOD_HOUR,
     edits: dict[tuple[date, int], dict[str, Any]] | None = None,
-    activities: tuple[str, ...] = ("hiking", "skiing"),
+    activities: tuple[str, ...] = ("hiking", "downhill_skiing"),
     alerts: tuple[Alert, ...] | None = (),
     fetched_at: datetime | None = None,
     daylight: bool = True,
@@ -132,15 +144,15 @@ DAYLIGHT = range(SUNRISE_HOUR, SUNSET_HOUR)
 
 
 def test_one_result_per_activity_per_day_for_today_and_tomorrow() -> None:
-    conditions = build(activities=("hiking", "skiing", "biking"))
+    conditions = build(activities=("hiking", "downhill_skiing", "biking"))
 
     (spot_score,) = score_conditions([conditions], THRESHOLDS, TZ).results
 
     assert [(s.activity, s.day) for s in spot_score.scores] == [
         ("hiking", TODAY),
         ("hiking", TOMORROW),
-        ("skiing", TODAY),
-        ("skiing", TOMORROW),
+        ("downhill_skiing", TODAY),
+        ("downhill_skiing", TOMORROW),
         ("biking", TODAY),
         ("biking", TOMORROW),
     ]
@@ -188,7 +200,7 @@ def test_activities_are_scored_separately() -> None:
     conditions = build(edits=edits)
 
     assert score(conditions, "hiking").status == "not_good"
-    assert score(conditions, "skiing").status == "good"
+    assert score(conditions, "downhill_skiing").status == "good"
 
 
 # --- hiking ---
@@ -403,7 +415,7 @@ def test_severe_alerts_fail_every_activity() -> None:
     )
 
     assert score(conditions, "hiking").status == "not_good"
-    assert score(conditions, "skiing").status == "not_good"
+    assert score(conditions, "downhill_skiing").status == "not_good"
 
 
 def test_an_alert_with_no_end_time_is_active() -> None:
@@ -451,7 +463,7 @@ def test_skiing_alert_window_starts_overnight() -> None:
     ends_overnight = at(TODAY, 3)
 
     skiing = score(
-        build(edits=edits, alerts=(alert("Severe", ends_overnight),)), "skiing"
+        build(edits=edits, alerts=(alert("Severe", ends_overnight),)), "downhill_skiing"
     )
     hiking = score(
         build(edits=edits, alerts=(alert("Severe", ends_overnight),)), "hiking"
@@ -475,7 +487,7 @@ def ski_day(
 
 
 def test_good_ski_day() -> None:
-    result = score(build(edits=ski_day()), "skiing")
+    result = score(build(edits=ski_day()), "downhill_skiing")
 
     assert result.status == "good"
     assert {c.name for c in result.checks} == {
@@ -490,7 +502,7 @@ def test_good_ski_day() -> None:
 def test_snow_on_the_ground_passes_without_new_snow() -> None:
     edits = day_edits(TODAY, DAYLIGHT, **COLD_CALM_HOUR, snow_depth_in=6.0)
 
-    result = score(build(edits=edits), "skiing")
+    result = score(build(edits=edits), "downhill_skiing")
 
     assert result.status == "good"
     (snow,) = [c for c in result.checks if c.name == "snow"]
@@ -500,7 +512,7 @@ def test_snow_on_the_ground_passes_without_new_snow() -> None:
 def test_snow_is_required() -> None:
     edits = day_edits(TODAY, DAYLIGHT, **COLD_CALM_HOUR)  # cold and calm, no snow
 
-    result = score(build(edits=edits), "skiing")
+    result = score(build(edits=edits), "downhill_skiing")
 
     assert result.status == "not_good"
     assert failed(result) == {"snow"}
@@ -515,7 +527,7 @@ def test_snow_with_no_data_is_no_data() -> None:
         )
     )
 
-    result = score(build(edits=edits), "skiing")
+    result = score(build(edits=edits), "downhill_skiing")
 
     assert result.status == "not_good"
     (snow,) = [c for c in result.checks if c.name == "snow"]
@@ -526,15 +538,24 @@ def test_snow_checks_are_strictly_above_the_minimums() -> None:
     # Exactly the minimum (0) is not snow, for either snowfall or depth.
     edits = day_edits(TODAY, DAYLIGHT, **COLD_CALM_HOUR, snow_depth_in=0.0)
     edits[(TODAY, 3)] = {"snowfall_in": 0.0}
-    assert score(build(edits=edits), "skiing").status == "not_good"
+    assert score(build(edits=edits), "downhill_skiing").status == "not_good"
 
     stricter = dataclasses.replace(
-        THRESHOLDS, skiing=dataclasses.replace(THRESHOLDS.skiing, min_snowfall_in=0.5)
+        THRESHOLDS,
+        downhill_skiing=dataclasses.replace(
+            THRESHOLDS.downhill_skiing, min_snowfall_in=0.5
+        ),
     )
     edits[(TODAY, 3)] = {"snowfall_in": 0.5}
-    assert score(build(edits=edits), "skiing", thresholds=stricter).status == "not_good"
+    assert (
+        score(build(edits=edits), "downhill_skiing", thresholds=stricter).status
+        == "not_good"
+    )
     edits[(TODAY, 3)] = {"snowfall_in": 0.51}
-    assert score(build(edits=edits), "skiing", thresholds=stricter).status == "good"
+    assert (
+        score(build(edits=edits), "downhill_skiing", thresholds=stricter).status
+        == "good"
+    )
 
 
 def test_a_snow_weather_code_alone_does_not_count() -> None:
@@ -544,7 +565,7 @@ def test_a_snow_weather_code_alone_does_not_count() -> None:
         "weather_code": 73,
     }  # snow code, no snowfall
 
-    assert score(build(edits=edits), "skiing").status == "not_good"
+    assert score(build(edits=edits), "downhill_skiing").status == "not_good"
 
 
 @pytest.mark.parametrize(
@@ -558,8 +579,8 @@ def test_ski_boundaries_are_strict(field: str, good: float, bad: float) -> None:
     fails = dict(passes)
     fails.update(day_edits(TODAY, DAYLIGHT, **{**base, field: bad}))
 
-    assert score(build(edits=passes), "skiing").status == "good"
-    result = score(build(edits=fails), "skiing")
+    assert score(build(edits=passes), "downhill_skiing").status == "good"
+    result = score(build(edits=fails), "downhill_skiing")
     assert result.status == "not_good"
     assert field in failed(result)
 
@@ -568,7 +589,7 @@ def test_overnight_window_for_today_runs_from_the_start_of_the_data() -> None:
     edits = day_edits(TODAY, DAYLIGHT, **COLD_CALM_HOUR)
     edits[(TODAY, 0)] = {"snowfall_in": 0.3}  # the very first hour of the data
 
-    assert score(build(edits=edits), "skiing").status == "good"
+    assert score(build(edits=edits), "downhill_skiing").status == "good"
 
 
 def test_overnight_window_for_tomorrow_starts_at_todays_sunset() -> None:
@@ -576,26 +597,31 @@ def test_overnight_window_for_tomorrow_starts_at_todays_sunset() -> None:
     after_sunset = {**cold_tomorrow, (TODAY, SUNSET_HOUR): {"snowfall_in": 0.4}}
     during_today = {**cold_tomorrow, (TODAY, 12): {"snowfall_in": 0.4}}
 
-    assert score(build(edits=after_sunset), "skiing", TOMORROW).status == "good"
+    assert (
+        score(build(edits=after_sunset), "downhill_skiing", TOMORROW).status == "good"
+    )
     # Snow that fell in the middle of today isn't "overnight" for tomorrow.
-    assert score(build(edits=during_today), "skiing", TOMORROW).status == "not_good"
+    assert (
+        score(build(edits=during_today), "downhill_skiing", TOMORROW).status
+        == "not_good"
+    )
 
 
 def test_overnight_snow_after_sunrise_does_not_count_as_overnight() -> None:
     edits = day_edits(TODAY, DAYLIGHT, **COLD_CALM_HOUR)
     edits[(TODAY, SUNRISE_HOUR)] = {**COLD_CALM_HOUR, "snowfall_in": 0.4}
 
-    assert score(build(edits=edits), "skiing").status == "not_good"
+    assert score(build(edits=edits), "downhill_skiing").status == "not_good"
 
 
 def test_overnight_snow_is_not_trimmed_by_the_fetch_time() -> None:
     conditions = build(edits=ski_day(), fetched_at=at(TODAY, 6, 30))
 
-    assert score(conditions, "skiing").status == "good"
+    assert score(conditions, "downhill_skiing").status == "good"
 
 
 def test_ski_day_without_a_daylight_window_is_no_data() -> None:
-    result = score(build(edits=ski_day(), daylight=False), "skiing")
+    result = score(build(edits=ski_day(), daylight=False), "downhill_skiing")
 
     assert result.status == "not_good"
     assert "no data: no daylight window" in result.reasons
@@ -605,7 +631,7 @@ def test_ski_temperature_and_wind_are_checked_in_daylight_only() -> None:
     edits = ski_day()
     edits[(TODAY, 20)] = {"temperature_f": 70.0, "wind_speed_mph": 40.0}  # evening
 
-    assert score(build(edits=edits), "skiing").status == "good"
+    assert score(build(edits=edits), "downhill_skiing").status == "good"
 
 
 # --- daylight saving time ---
@@ -616,7 +642,7 @@ def real_fall_back_day() -> SpotConditions:
         load_fixture("open_meteo_dst_fall_back.json"), TZ
     )
     return SpotConditions(
-        spot=make_spot("hiking", "skiing"),
+        spot=make_spot("hiking", "downhill_skiing"),
         fetched_at=datetime(2026, 11, 1, 4, 30, tzinfo=UTC),  # 00:30 EDT on Nov 1
         hourly=hourly,
         daylight=daylight,
@@ -633,7 +659,9 @@ def test_fall_back_day_overnight_window_includes_both_1am_hours() -> None:
     snowy = dataclasses.replace(second_1am, snowfall_in=0.6)
     hourly = (*conditions.hourly[:2], snowy, *conditions.hourly[3:])
     result = score(
-        dataclasses.replace(conditions, hourly=hourly), "skiing", date(2026, 11, 1)
+        dataclasses.replace(conditions, hourly=hourly),
+        "downhill_skiing",
+        date(2026, 11, 1),
     )
 
     (snow,) = [c for c in result.checks if c.name == "snow"]
@@ -675,7 +703,7 @@ def test_run_of_hours_is_continuous_across_the_repeated_hour() -> None:
 def test_the_real_forecast_fixture_scores_end_to_end() -> None:
     hourly, daylight = normalize_forecast(load_fixture("open_meteo_warm_dry.json"), TZ)
     conditions = SpotConditions(
-        spot=make_spot("hiking", "skiing"),
+        spot=make_spot("hiking", "downhill_skiing"),
         fetched_at=datetime(2026, 6, 15, 4, 0, tzinfo=ET),
         hourly=hourly,
         daylight=daylight,
@@ -687,4 +715,259 @@ def test_the_real_forecast_fixture_scores_end_to_end() -> None:
     by_key = {(s.activity, s.day): s.status for s in spot_score.scores}
     assert by_key[("hiking", date(2026, 6, 15))] == "good"
     assert by_key[("hiking", date(2026, 6, 16))] == "good"
-    assert by_key[("skiing", date(2026, 6, 15))] == "not_good"  # warm, no snow
+    assert by_key[("downhill_skiing", date(2026, 6, 15))] == "not_good"  # warm, no snow
+
+
+# --- cross-country skiing ---
+
+XC = "cross_country_skiing"
+XC_GOOD: dict[str, Any] = {
+    "temperature_f": 20.0,
+    "wind_speed_mph": 3.0,
+    "snow_depth_in": 6.0,
+    "precipitation_probability_pct": 10,
+    "rain_in": 0.0,
+}
+
+
+def xc_build(
+    edits: dict[tuple[date, int], dict[str, Any]] | None = None,
+    **kwargs: Any,
+) -> SpotConditions:
+    """A cold, calm, snowy day (good for cross-country) with `edits` on top."""
+    base = {**GOOD_HOUR, **XC_GOOD}
+    return build(base=base, edits=edits, activities=(XC,), **kwargs)
+
+
+def xc_thresholds(**changes: Any) -> Thresholds:
+    return dataclasses.replace(
+        THRESHOLDS,
+        cross_country_skiing=dataclasses.replace(XC_THRESHOLDS, **changes),
+    )
+
+
+def test_good_cross_country_day() -> None:
+    result = score(xc_build(), XC)
+
+    assert result.status == "good"
+    assert result.reasons == ()
+    assert {c.name for c in result.checks} == {
+        "snow_depth_in",
+        "temperature_f",
+        "wind_speed_mph",
+        "precipitation_probability_pct",
+        "rain_in",
+        "usable_run",
+        "alerts",
+    }
+
+
+def test_cross_country_gets_a_result_for_today_and_tomorrow() -> None:
+    (spot_score,) = score_conditions([xc_build()], THRESHOLDS, TZ).results
+
+    assert [(s.activity, s.day, s.status) for s in spot_score.scores] == [
+        (XC, TODAY, "good"),
+        (XC, TOMORROW, "good"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("depth", "expected"),
+    [(5.0, "good"), (4.9, "not_good"), (3.0, "not_good"), (0.0, "not_good")],
+)
+def test_cross_country_needs_five_inches_of_snow(depth: float, expected: str) -> None:
+    edits = day_edits(TODAY, DAYLIGHT, snow_depth_in=depth)
+
+    result = score(xc_build(edits), XC)
+
+    assert result.status == expected
+    if expected == "not_good":
+        assert "snow_depth_in" in failed(result)
+
+
+@pytest.mark.parametrize(
+    ("temperature", "expected"),
+    [
+        (31.9, "good"),
+        (32.0, "not_good"),  # strictly below 32
+        (50.0, "not_good"),  # a warm day with snow on the ground
+        (10.0, "good"),  # at least 10
+        (9.9, "not_good"),  # too cold
+        (-5.0, "not_good"),
+    ],
+)
+def test_cross_country_temperature_window(temperature: float, expected: str) -> None:
+    edits = day_edits(TODAY, DAYLIGHT, temperature_f=temperature)
+
+    result = score(xc_build(edits), XC)
+
+    assert result.status == expected
+    if expected == "not_good":
+        (check,) = [c for c in result.checks if c.name == "temperature_f"]
+        assert check.limit == ">= 10 and < 32 F"
+        assert not check.passed
+
+
+@pytest.mark.parametrize(
+    "wind, expected", [(9.9, "good"), (10.0, "not_good"), (25.0, "not_good")]
+)
+def test_cross_country_wind_is_strictly_below_the_limit(
+    wind: float, expected: str
+) -> None:
+    edits = day_edits(TODAY, DAYLIGHT, wind_speed_mph=wind)
+
+    assert score(xc_build(edits), XC).status == expected
+
+
+@pytest.mark.parametrize("chance, expected", [(30, "good"), (31, "not_good")])
+def test_cross_country_rain_chance_limit_is_inclusive(
+    chance: int, expected: str
+) -> None:
+    edits = day_edits(TODAY, DAYLIGHT, precipitation_probability_pct=chance)
+
+    assert score(xc_build(edits), XC).status == expected
+
+
+def test_any_rain_fails_cross_country() -> None:
+    edits = day_edits(TODAY, DAYLIGHT, rain_in=0.001)
+
+    result = score(xc_build(edits), XC)
+
+    assert result.status == "not_good"
+    assert "rain_in" in failed(result)
+    (check,) = [c for c in result.checks if c.name == "rain_in"]
+    assert check.limit == "<= 0 in per hour"
+
+
+def test_snowfall_is_not_rain() -> None:
+    # Total precipitation includes snow's water; only liquid rain counts as rain.
+    edits = day_edits(
+        TODAY, DAYLIGHT, precipitation_in=0.2, snowfall_in=1.5, rain_in=0.0
+    )
+
+    assert score(xc_build(edits), XC).status == "good"
+
+
+def test_fresh_snow_overnight_is_not_required() -> None:
+    # Depth is fine but nothing fell overnight or at all: still good.
+    edits = day_edits(TODAY, range(0, 24), snowfall_in=0.0)
+
+    assert score(xc_build(edits), XC).status == "good"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "snow_depth_in",
+        "temperature_f",
+        "wind_speed_mph",
+        "precipitation_probability_pct",
+        "rain_in",
+    ],
+)
+def test_cross_country_missing_values_do_not_pass(field: str) -> None:
+    edits = day_edits(TODAY, DAYLIGHT, **{field: None})
+
+    result = score(xc_build(edits), XC)
+
+    assert result.status == "not_good"
+    (check,) = [c for c in result.checks if c.name == field]
+    assert not check.passed
+    assert "first fail 07:00: missing" in check.value
+
+
+def test_a_midday_thaw_breaks_the_run() -> None:
+    # 07-09 is cold (3 hours), 10-13 thaws, 14-16 is cold again (3 hours).
+    edits = day_edits(TODAY, range(10, 14), temperature_f=40.0)
+
+    result = score(xc_build(edits), XC)
+
+    assert result.status == "not_good"
+    assert failed(result) == {"temperature_f", "usable_run"}  # the thaw hours fail
+
+
+def test_three_good_hours_then_a_gap_then_three_is_not_a_run() -> None:
+    edits = day_edits(TODAY, DAYLIGHT, snow_depth_in=0.0)
+    edits.update({(TODAY, h): {"snow_depth_in": 6.0} for h in (7, 8, 9, 11, 12, 13)})
+
+    assert score(xc_build(edits), XC).status == "not_good"
+
+
+def test_cross_country_thresholds_come_from_the_config() -> None:
+    conditions = xc_build()
+
+    assert score(conditions, XC).status == "good"  # 6 in of snow, limit 5
+    stricter = xc_thresholds(min_snow_depth_in=8)
+    assert score(conditions, XC, thresholds=stricter).status == "not_good"
+    windier = xc_thresholds(max_wind_mph=2)
+    assert score(conditions, XC, thresholds=windier).status == "not_good"
+    warmer = xc_thresholds(max_temperature_f=15)
+    assert score(conditions, XC, thresholds=warmer).status == "not_good"
+
+
+def test_cross_country_without_a_daylight_window_is_no_data() -> None:
+    result = score(xc_build(daylight=False), XC)
+
+    assert result.status == "not_good"
+    assert "no data: no daylight window" in result.reasons
+
+
+def test_cross_country_without_hourly_rows_is_no_data() -> None:
+    result = score(dataclasses.replace(xc_build(), hourly=()), XC)
+
+    assert failed(result) == {"hourly_data"}
+
+
+def test_cross_country_only_counts_the_remaining_hours_today() -> None:
+    result = score(xc_build(fetched_at=at(TODAY, 14, 30)), XC)
+
+    assert failed(result) == {"hours_left"}
+    assert score(xc_build(fetched_at=at(TODAY, 13, 30)), XC).status == "good"
+
+
+def test_cross_country_alerts_follow_the_same_rules() -> None:
+    assert score(xc_build(alerts=None), XC).status == "not_good"
+    assert score(xc_build(alerts=(alert("Severe"),)), XC).status == "not_good"
+    assert score(xc_build(alerts=(alert("Extreme"),)), XC).status == "not_good"
+    minor = score(xc_build(alerts=(alert("Minor"),)), XC)
+    assert minor.status == "good"
+    assert minor.notes == ("alert: Storm (Minor)",)
+
+
+def test_cross_country_alert_window_starts_at_sunrise() -> None:
+    # Ends overnight, before sunrise: over by the time the window starts.
+    overnight = alert("Severe", at(TODAY, 3))
+
+    assert score(xc_build(alerts=(overnight,)), XC).status == "good"
+    # Downhill's window starts overnight, so the same alert fails it.
+    downhill = build(
+        base={**GOOD_HOUR, **COLD_CALM_HOUR},
+        edits={(TODAY, 3): {"snowfall_in": 1.0}},
+        activities=("downhill_skiing",),
+        alerts=(overnight,),
+    )
+    assert "alerts" in failed(score(downhill, "downhill_skiing"))
+
+
+def test_hiking_and_cross_country_are_scored_independently() -> None:
+    cold = build(
+        base={**GOOD_HOUR, **XC_GOOD}, activities=("hiking", XC)
+    )  # cold and snowy: bad for hiking, good for cross-country
+    warm = build(
+        base={**GOOD_HOUR, "temperature_f": 60.0, "snow_depth_in": 6.0},
+        activities=("hiking", XC),
+    )  # warm: good for hiking, too warm for cross-country
+
+    assert score(cold, "hiking").status == "not_good"
+    assert score(cold, XC).status == "good"
+    assert score(warm, "hiking").status == "good"
+    assert score(warm, XC).status == "not_good"
+
+
+def test_cross_country_and_downhill_can_disagree_on_the_same_snow() -> None:
+    # 3 inches on the ground: any snow satisfies downhill, but not cross-country.
+    base = {**GOOD_HOUR, **XC_GOOD, "snow_depth_in": 3.0}
+    conditions = build(base=base, activities=("downhill_skiing", XC))
+
+    assert score(conditions, "downhill_skiing").status == "good"
+    assert score(conditions, XC).status == "not_good"
