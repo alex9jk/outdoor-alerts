@@ -1,0 +1,13 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "properties": {
+        "event": "Special Weather Statement",
+        "severity": null,
+        "headline": null,
+        "ends": null
+      }
+    }
+  ]
+}

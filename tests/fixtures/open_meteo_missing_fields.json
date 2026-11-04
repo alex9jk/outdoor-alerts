@@ -1,0 +1,49 @@
+{
+  "hourly": {
+    "time": [
+      1781528400,
+      1781532000,
+      1781535600
+    ],
+    "temperature_2m": [
+      60.0,
+      null,
+      62.0
+    ],
+    "precipitation_probability": [
+      null,
+      null,
+      null
+    ],
+    "precipitation": [
+      0.0,
+      0.0,
+      null
+    ],
+    "wind_speed_10m": [
+      5.0,
+      6.0,
+      7.0
+    ],
+    "weather_code": [
+      1,
+      null,
+      2
+    ]
+  },
+  "daily": {
+    "time": [
+      1781496000,
+      1781582400
+    ],
+    "sunrise": [
+      1781515500,
+      null
+    ],
+    "sunset": [
+      1781570100,
+      1781656560
+    ]
+  },
+  "utc_offset_seconds": -14400
+}
