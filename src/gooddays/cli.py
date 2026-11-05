@@ -13,7 +13,16 @@ from zoneinfo import ZoneInfo
 from gooddays.fetch.raw import RawSnapshot, read_fetch_time, replay_fetchers
 from gooddays.fetch.service import Fetchers, fetch_conditions
 from gooddays.message import MessageWriter, generate_message
-from gooddays.models import FetchResult, ScoreResult, Settings, Spot
+from gooddays.models import FetchResult, Message, ScoreResult, Settings, Spot
+from gooddays.notify import (
+    RECIPIENT_ENV,
+    SendError,
+    SmsSender,
+    mask_number,
+    parse_recipient,
+    segment_count,
+    send_notification,
+)
 from gooddays.report import score_to_json, score_to_text, to_json, to_text
 from gooddays.score import score_conditions
 from gooddays.storage import ConfigError, LocalStorage
@@ -27,6 +36,7 @@ EXIT_OK = 0
 EXIT_ALL_SPOTS_FAILED = 1
 EXIT_USAGE_OR_CONFIG = 2
 EXIT_SAVE_FAILED = 3  # --save-raw could not save everything
+EXIT_SEND_FAILED = 4  # `send` could not get the text accepted by the provider
 EXIT_UNEXPECTED = 70  # a bug or environment problem (sysexits EX_SOFTWARE)
 EXIT_BROKEN_PIPE = 141  # stdout closed early, e.g. `| head` (128 + SIGPIPE)
 EXIT_INTERRUPTED = 130  # Ctrl-C (128 + SIGINT)
@@ -106,6 +116,36 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip Claude and print the code-built text (works offline, needs no key)",
     )
+
+    send = commands.add_parser(
+        "send",
+        help="run the whole pipeline and text the result to your phone",
+        description=(
+            "Like `message`, but then sends the text as an SMS through Twilio. "
+            "Sending is real, costs money and cannot be undone: use --dry-run to "
+            "print instead. Set GOODDAYS_SMS_TO (your number, like +14155550123), "
+            "GOODDAYS_SMS_FROM, TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN. Nothing is "
+            "stored, so running it again sends the same text again. Exit codes as for "
+            "score, plus 4 when the text could not be sent (the text is still printed)."
+        ),
+    )
+    _add_spots_option(send)
+    send.add_argument(
+        "--fixtures",
+        type=Path,
+        metavar="DIR",
+        help="use a folder written by `fetch --save-raw` instead of calling the APIs",
+    )
+    send.add_argument(
+        "--no-ai",
+        action="store_true",
+        help="skip Claude and use the code-built text (works offline, needs no key)",
+    )
+    send.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the text instead of sending it (needs no number or Twilio account)",
+    )
     return parser
 
 
@@ -166,6 +206,8 @@ def _run(argv: Sequence[str] | None) -> int:
             return _score(args, settings, spots, storage)
         if args.command == "message":
             return _message(args, settings, spots, storage)
+        if args.command == "send":
+            return _send(args, settings, spots, storage)
     except ConfigError as e:  # the thresholds are checked before anything is fetched
         print(f"config error: {e}", file=sys.stderr)
         return EXIT_USAGE_OR_CONFIG
@@ -209,12 +251,13 @@ def anthropic_writer() -> MessageWriter:
     return build()
 
 
-def _message(
+def _message_run(
     args: argparse.Namespace,
     settings: Settings,
     spots: list[Spot],
     storage: LocalStorage,
-) -> int:
+) -> tuple[FetchResult, Message | None]:
+    """Fetch, score and write the message (shared by `message` and `send`)."""
     result, scores = _score_run(args, settings, spots, storage)
     message = generate_message(
         spots,
@@ -224,8 +267,89 @@ def _message(
         settings.timezone,
         writer=None if args.no_ai else anthropic_writer(),
     )
+    return result, message
+
+
+def _all_spots_failed(result: FetchResult) -> bool:
+    return bool(result.errors) and not result.results
+
+
+def _message(
+    args: argparse.Namespace,
+    settings: Settings,
+    spots: list[Spot],
+    storage: LocalStorage,
+) -> int:
+    result, message = _message_run(args, settings, spots, storage)
     _emit(message.body if message is not None else "nothing to send")
-    return EXIT_ALL_SPOTS_FAILED if result.errors and not result.results else EXIT_OK
+    return EXIT_ALL_SPOTS_FAILED if _all_spots_failed(result) else EXIT_OK
+
+
+def sms_sender() -> SmsSender:
+    """The Twilio sender. Imported here so only `send` loads it.
+
+    Raises ConfigError, naming the setting, when a credential is missing.
+    """
+    from gooddays.sms_sender import load_twilio_settings, twilio_sender
+
+    return twilio_sender(load_twilio_settings())
+
+
+def _send(
+    args: argparse.Namespace,
+    settings: Settings,
+    spots: list[Spot],
+    storage: LocalStorage,
+) -> int:
+    result, message = _message_run(args, settings, spots, storage)
+    # "nothing to send" can mean no good days or every spot failing: the exit code
+    # tells them apart, so follow the failure, not the text.
+    if message is None:
+        _emit("nothing to send")
+        return EXIT_ALL_SPOTS_FAILED if _all_spots_failed(result) else EXIT_OK
+
+    segments = segment_count(message.body)
+    if args.dry_run:
+        _emit(message.body)
+        print(f"dry run: not sent ({segments} segment(s))", file=sys.stderr)
+        return EXIT_OK
+
+    # Everything below is a real, billable, irreversible send.
+    if os.environ.get("CI"):
+        print(
+            "error: refusing to send a real SMS when CI is set (use --dry-run)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE_OR_CONFIG
+    recipient = parse_recipient(os.environ.get(RECIPIENT_ENV))  # ConfigError -> exit 2
+    sender = sms_sender()  # ConfigError names a missing credential -> exit 2
+    masked = mask_number(recipient)
+    print(
+        f"warning: sending a real SMS to {masked}; nothing is stored, so running "
+        "this again sends the same text again",
+        file=sys.stderr,
+    )
+    try:
+        sent = send_notification(message, recipient, sender)
+    except SendError as error:
+        _emit(message.body)  # the text is not lost
+        note = (
+            " (it may still have been delivered)"
+            if error.reason == "read_timeout"
+            else ""
+        )
+        print(
+            f"error: SMS not sent (reason={error.reason}, "
+            f"attempts={error.attempts}){note}",
+            file=sys.stderr,
+        )
+        return EXIT_SEND_FAILED
+    _emit(message.body)
+    _emit(
+        f"sent to {masked} (accepted by the provider, not confirmed delivered; "
+        f"id={sent.message_id}, attempts={sent.attempts}, segments={segments})"
+    )
+    return EXIT_OK
 
 
 def _fetch(args: argparse.Namespace, settings: Settings, spots: list[Spot]) -> int:

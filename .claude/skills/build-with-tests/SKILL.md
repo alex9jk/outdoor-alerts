@@ -9,8 +9,8 @@ Follow this workflow for any feature work. Its goal is code that looks like the 
 
 ## 1. Read before you write
 - Read `CLAUDE.md` in full. It sets the stack, non-goals, conventions, and guardrails. A feature that breaks a rule is wrong even if it works. In particular:
-  - Only build the stage named under "Current focus". Don't build later stages early.
-  - No AWS dependencies yet.
+  - Only build what "Current focus" in `CLAUDE.md` names, if it names one. Don't build later stages early.
+  - No AWS dependencies yet (the SMS sender uses Twilio over `httpx`).
   - Don't add dependencies without asking the user first.
   - No hard-coded locations, thresholds, or settings; they live in `spots.yaml`.
   - `fetch_conditions` only fetches and normalizes; it does no scoring or judgment.

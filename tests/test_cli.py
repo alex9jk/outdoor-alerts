@@ -17,6 +17,7 @@ from gooddays.cli import main
 from gooddays.fetch.nws import ALERTS_URL
 from gooddays.fetch.open_meteo import FORECAST_URL
 from gooddays.message import MESSAGE_CAP, WriterError
+from gooddays.notify import SendError
 from gooddays.storage import USER_AGENT_ENV_VAR
 from helpers import load_fixture
 
@@ -1040,3 +1041,379 @@ def test_message_help_mentions_the_key_and_no_ai() -> None:
 
     assert done.returncode == 0
     assert "--no-ai" in done.stdout and "ANTHROPIC_API_KEY" in done.stdout
+
+
+# --- send ---
+
+TO = "+14155550123"
+SMS_ENV = {
+    "GOODDAYS_SMS_TO": TO,
+    "GOODDAYS_SMS_FROM": "+15005550006",
+    "TWILIO_ACCOUNT_SID": "ACtest0000000000000000000000000000",
+    "TWILIO_AUTH_TOKEN": "secret-token-value",
+}
+# What the saved warm, dry run turns into without Claude (see the message tests).
+SEND_BODY = (
+    "Today Mon Jun 15:\n"
+    "Spot 0 hiking: 65 F, wind 5 mph, daylight 5:25-20:35\n"
+    "Tomorrow Tue Jun 16:\n"
+    "Spot 0 hiking: 65 F, wind 5 mph, daylight 5:25-20:36"
+)
+
+
+class FakeSms:
+    """A fake SmsSender: each call returns the next outcome (an id or an error)."""
+
+    def __init__(self, *outcomes: str | SendError) -> None:
+        self.outcomes = list(outcomes) or ["SM123"]
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, to: str, body: str) -> str:
+        self.calls.append((to, body))
+        outcome = self.outcomes[min(len(self.calls), len(self.outcomes)) - 1]
+        if isinstance(outcome, SendError):
+            raise outcome
+        return outcome
+
+
+def use_sms(monkeypatch: pytest.MonkeyPatch, sender: Any) -> None:
+    monkeypatch.setattr(cli, "sms_sender", lambda: sender)
+
+
+def forbid_sms(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden() -> Any:
+        raise AssertionError("the SMS sender must not be built here")
+
+    monkeypatch.setattr(cli, "sms_sender", forbidden)
+
+
+def sms_env(monkeypatch: pytest.MonkeyPatch, **overrides: str | None) -> None:
+    for name, value in {**SMS_ENV, **overrides}.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+
+def send_args(folder: Path, *extra: str) -> list[str]:
+    return ["send", "--no-ai", "--fixtures", str(folder), *extra]
+
+
+def test_send_sends_the_text_once_unchanged(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    sms_env(monkeypatch)
+    sms = FakeSms("SM777")
+    use_sms(monkeypatch, sms)
+
+    with caplog.at_level(logging.INFO):
+        assert main(send_args(folder)) == 0
+
+    out, err = capsys.readouterr()
+    assert sms.calls == [(TO, SEND_BODY)]
+    assert out.splitlines()[:-1] == SEND_BODY.splitlines()  # the text, then the status
+    assert out.splitlines()[-1] == (
+        "sent to +***0123 (accepted by the provider, not confirmed delivered; "
+        "id=SM777, attempts=1, segments=1)"
+    )
+    assert "sending a real SMS to +***0123" in err
+    assert "running this again sends the same text again" in err
+    # The full number and the body stay out of every output and log.
+    assert (
+        TO not in out + err + caplog.text and "5550123" not in out + err + caplog.text
+    )
+    assert SEND_BODY not in caplog.text
+
+
+def test_send_dry_run_prints_the_text_and_needs_nothing(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    forbid_sms(monkeypatch)  # no sender, no phone number, no credentials
+
+    assert main(send_args(folder, "--dry-run")) == 0
+
+    out, err = capsys.readouterr()
+    assert out.rstrip("\n") == SEND_BODY
+    assert "dry run: not sent (1 segment(s))" in err
+
+
+def test_send_dry_run_is_allowed_in_ci(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    forbid_sms(monkeypatch)
+    monkeypatch.setenv("CI", "true")
+
+    assert main(send_args(folder, "--dry-run")) == 0
+    assert capsys.readouterr().out.rstrip("\n") == SEND_BODY
+
+
+@pytest.mark.parametrize("value", ["true", "1", "false"])  # any non-empty value counts
+def test_send_refuses_to_send_for_real_in_ci(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    sms_env(monkeypatch)
+    forbid_sms(monkeypatch)
+    monkeypatch.setenv("CI", value)
+
+    assert main(send_args(folder)) == 2
+
+    assert "refusing to send a real SMS when CI is set" in capsys.readouterr().err
+
+
+def test_send_with_nothing_to_send_sends_nothing_and_needs_no_settings(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forbid_sms(monkeypatch)  # no good days: no sender, and no phone number is read
+    folder = write_saved_run(project / "saved")
+
+    assert main(send_args(folder)) == 0
+
+    assert capsys.readouterr().out == "nothing to send\n"
+
+
+def test_send_when_every_spot_failed_exits_1_and_sends_nothing(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sms_env(monkeypatch)
+    forbid_sms(monkeypatch)
+    (project / "empty").mkdir()
+
+    assert main(send_args(project / "empty")) == 1
+
+    assert capsys.readouterr().out == "nothing to send\n"
+
+
+def test_send_without_a_recipient_exits_2_naming_the_setting(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    sms_env(monkeypatch, GOODDAYS_SMS_TO=None)
+    forbid_sms(monkeypatch)
+
+    assert main(send_args(folder)) == 2
+
+    assert "GOODDAYS_SMS_TO" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "bad", ["2125559876", "+0155550123", "+1212", "call me", "+1 212 555 9876"]
+)
+def test_send_with_an_invalid_recipient_exits_2_without_echoing_it(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    bad: str,
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    sms_env(monkeypatch, GOODDAYS_SMS_TO=bad)
+    forbid_sms(monkeypatch)
+
+    assert main(send_args(folder)) == 2
+
+    out, err = capsys.readouterr()
+    assert "GOODDAYS_SMS_TO" in err and bad not in out + err
+
+
+def test_send_with_missing_credentials_exits_2_naming_them(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    sms_env(
+        monkeypatch,
+        TWILIO_ACCOUNT_SID=None,
+        TWILIO_AUTH_TOKEN=None,
+        GOODDAYS_SMS_FROM=None,
+    )
+
+    assert main(send_args(folder)) == 2  # the real sender loader, no client made
+
+    err = capsys.readouterr().err
+    for name in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "GOODDAYS_SMS_FROM"):
+        assert name in err
+    assert TO not in err
+
+
+def test_forgetting_to_fake_the_sender_cannot_send_for_real(
+    project: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Everything is configured but the test did not fake the sender: the autouse
+    # guard stops it before any client exists (an unexpected error, exit 70).
+    folder = write_warm_dry_run(project / "saved")
+    sms_env(monkeypatch)
+
+    with caplog.at_level(logging.ERROR):
+        assert main(send_args(folder)) == 70
+
+    assert "fake the sender" in caplog.text
+
+
+def test_send_failure_prints_the_text_and_exits_4(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    sms_env(monkeypatch)
+    sms = FakeSms(SendError("server_error", retryable=True))
+    use_sms(monkeypatch, sms)
+
+    assert main(send_args(folder)) == 4
+
+    out, err = capsys.readouterr()
+    assert out.rstrip("\n") == SEND_BODY  # the text is not lost
+    assert "error: SMS not sent (reason=server_error, attempts=2)" in err
+    assert len(sms.calls) == 2  # one retry, then it gives up
+    assert "sent to" not in out
+
+
+def test_send_failure_after_a_read_timeout_says_it_may_have_arrived(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    sms_env(monkeypatch)
+    sms = FakeSms(SendError("read_timeout"))
+    use_sms(monkeypatch, sms)
+
+    assert main(send_args(folder)) == 4
+
+    err = capsys.readouterr().err
+    assert (
+        "reason=read_timeout, attempts=1" in err
+        and "may still have been delivered" in err
+    )
+    assert len(sms.calls) == 1  # never retried: it could text twice
+
+
+def test_send_succeeds_after_a_retry(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    sms_env(monkeypatch)
+    use_sms(monkeypatch, FakeSms(SendError("connection_error", retryable=True), "SM5"))
+
+    assert main(send_args(folder)) == 0
+
+    assert "id=SM5, attempts=2" in capsys.readouterr().out
+
+
+@respx.mock
+def test_send_end_to_end_through_the_real_twilio_adapter(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    real_sms_client: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from urllib.parse import parse_qs
+
+    folder = write_warm_dry_run(project / "saved")
+    sms_env(monkeypatch)
+    real_sms_client()  # the real adapter and httpx client, under respx
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{SMS_ENV['TWILIO_ACCOUNT_SID']}/Messages.json"
+    route = respx.post(url).mock(
+        return_value=httpx.Response(201, json={"sid": "SMabc", "status": "queued"})
+    )
+
+    with caplog.at_level(logging.INFO):
+        assert main(send_args(folder)) == 0
+
+    (call,) = route.calls
+    assert parse_qs(call.request.content.decode()) == {
+        "To": [TO],
+        "From": [SMS_ENV["GOODDAYS_SMS_FROM"]],
+        "Body": [SEND_BODY],
+    }
+    out, err = capsys.readouterr()
+    assert "id=SMabc" in out
+    everything = out + err + caplog.text
+    assert SMS_ENV["TWILIO_AUTH_TOKEN"] not in everything
+    assert SMS_ENV["TWILIO_ACCOUNT_SID"] not in everything  # httpx's URL log stays off
+    assert TO not in everything
+
+
+def test_message_never_builds_a_sender(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    sms_env(monkeypatch)
+    forbid_sms(monkeypatch)
+
+    assert main(["message", "--no-ai", "--fixtures", str(folder)]) == 0
+
+
+def test_send_unexpected_error_exits_70(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def explode(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cli, "generate_message", explode)
+    folder = write_warm_dry_run(project / "saved")
+
+    assert main(send_args(folder, "--dry-run")) == 70
+
+
+def test_send_with_bad_thresholds_exits_2_before_anything_is_sent(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (project / "spots.yaml").write_text(
+        SPOTS_YAML.replace("max_rain_in: 0", "max_rain_in: -1")
+    )
+    forbid_sms(monkeypatch)
+
+    assert main(["send", "--no-ai", "--dry-run"]) == 2
+
+    assert (
+        "config error: thresholds.cross_country_skiing.max_rain_in"
+        in capsys.readouterr().err
+    )
+
+
+def test_send_fixtures_must_be_a_directory(project: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["send", "--fixtures", str(project / "nope")])
+
+    assert exc.value.code == 2
+
+
+def test_send_help_describes_the_real_send_and_exit_code_4(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["send", "--help"])
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 0
+    for text in (
+        "--dry-run",
+        "GOODDAYS_SMS_TO",
+        "TWILIO_AUTH_TOKEN",
+        "4 when the text",
+    ):
+        assert text in " ".join(out.split())
+
+
+def test_send_does_not_import_the_twilio_module_for_other_commands(
+    project: Path,
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    code = (
+        "import sys\n"
+        "from gooddays.cli import main\n"
+        f"code = main(['message', '--no-ai', '--fixtures', {str(folder)!r}])\n"
+        "print('CODE', code, 'sms_sender' in sys.modules)\n"
+    )
+
+    done = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+
+    assert "CODE 0 False" in done.stdout, done.stderr

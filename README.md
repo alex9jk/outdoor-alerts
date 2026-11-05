@@ -17,7 +17,7 @@ fetch_conditions → score_conditions → generate_message → send_notification
 | `fetch_conditions` | done | Calls Open-Meteo (2-day hourly forecast, sunrise/sunset) and the NWS API (active alerts) for each spot, and normalizes them into one `SpotConditions` per spot. |
 | `score_conditions` | done | Applies the thresholds in `spots.yaml` and says pass/fail per spot, activity and day. |
 | `generate_message` | done | Writes one short SMS digest of the good days. Claude writes the text; if it fails or its text fails checks, a plain text built by code is used instead. |
-| `send_notification` | not started | Will deliver the message. |
+| `send_notification` | done | Texts the message to your phone through Twilio (`send`). Nothing is sent unless you run `send` without `--dry-run`. |
 
 Everything runs locally as a plain Python package. AWS (Lambda, Step Functions,
 DynamoDB) is planned for later, so the code has no AWS dependencies yet.
@@ -52,8 +52,23 @@ than committing it:
 export GOODDAYS_NWS_USER_AGENT="gooddays (you@example.com)"
 ```
 
-The `message` command uses Claude and needs `ANTHROPIC_API_KEY`. Use `--no-ai` to skip
-it.
+The `message` and `send` commands use Claude and need `ANTHROPIC_API_KEY`. Use `--no-ai`
+to skip it.
+
+To send texts, `send` needs a Twilio account and a Twilio number. Set these in your shell
+(never commit them):
+
+```sh
+export GOODDAYS_SMS_TO="+14155550123"        # your phone, international format
+export GOODDAYS_SMS_FROM="+15005550006"      # your Twilio number
+export TWILIO_ACCOUNT_SID="AC..."
+export TWILIO_AUTH_TOKEN="..."
+```
+
+US carriers (AT&T included) filter unregistered business texts, so a Twilio US number
+usually needs registration before texts reach your phone, and trial accounts can send only
+to numbers you have verified with Twilio. Check Twilio's current rules. "Sent" means Twilio
+accepted the message, not that it was delivered.
 
 ## Usage
 
@@ -61,12 +76,16 @@ it.
 uv run python -m gooddays fetch   [--save-raw | --fixtures DIR] [--raw-root DIR] [--json] [--spots FILE]
 uv run python -m gooddays score   [--fixtures DIR] [--json] [--spots FILE]
 uv run python -m gooddays message [--fixtures DIR] [--no-ai] [--spots FILE]
+uv run python -m gooddays send    [--fixtures DIR] [--no-ai] [--dry-run] [--spots FILE]
 ```
 
 - `fetch` prints the normalized conditions for every spot.
 - `score` fetches, then prints pass/fail per spot, activity and day (today and tomorrow).
 - `message` fetches, scores and prints one SMS digest of the good days, or
   "nothing to send".
+- `send` does what `message` does, then texts the result to your phone. It is a real,
+  billable text unless you pass `--dry-run`; it refuses to send when the `CI` environment
+  variable is set. Nothing is stored, so running it again sends the same text again.
 - `--save-raw` (fetch only) also writes raw API responses to
   `data/raw/<date>/<spot_id>/` (git-ignored).
 - `--fixtures DIR` replays a folder written by `--save-raw` instead of calling the APIs,
@@ -81,6 +100,7 @@ uv run python -m gooddays message [--fixtures DIR] [--no-ai] [--spots FILE]
 | 1 | Every spot failed |
 | 2 | Bad usage or config |
 | 3 | `--save-raw` could not save everything |
+| 4 | `send` could not get the text accepted (the text is still printed) |
 | 70 | Unexpected error |
 | 130 | Interrupted (Ctrl-C) |
 | 141 | stdout closed early (e.g. `| head`) |
@@ -100,6 +120,8 @@ src/gooddays/
   score.py         # score_conditions()
   message.py       # generate_message(): checks and code-built fallback text
   ai_writer.py     # Claude-backed message writer (only module using the Anthropic SDK)
+  notify.py        # send_notification(): recipient checks and the narrow retry
+  sms_sender.py    # the Twilio sender (one httpx POST per message)
   report.py        # text and JSON output
   cli.py           # python -m gooddays ...
 tests/
