@@ -186,8 +186,10 @@ def _run(argv: Sequence[str] | None) -> int:
         stream=sys.stderr,  # keeps stdout clean for --json
         format="time=%(asctime)s level=%(levelname)s logger=%(name)s %(message)s",
     )
-    # httpx logs every request URL at INFO; the service already logs what matters.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # These libraries log request URLs (httpx) or request details such as the message
+    # itself (botocore at DEBUG); our own modules already log what matters.
+    for noisy in ("httpx", "httpcore", "botocore", "boto3", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     if args.fixtures is not None and not args.fixtures.is_dir():
         parser.error(f"--fixtures: not a directory: {args.fixtures}")

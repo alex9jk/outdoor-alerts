@@ -1436,3 +1436,53 @@ def test_other_commands_never_import_boto3(project: Path, command: str) -> None:
     )
 
     assert "CODE 0 False False" in done.stdout, done.stderr
+
+
+def test_noisy_libraries_are_held_at_warning(project: Path) -> None:
+    folder = write_warm_dry_run(project / "saved")
+
+    assert main(send_args(folder, "--dry-run")) == 0
+
+    for name in ("httpx", "httpcore", "botocore", "boto3", "urllib3"):
+        assert logging.getLogger(name).level == logging.WARNING, name
+
+
+def test_even_at_debug_the_real_adapter_never_logs_the_message(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from botocore.awsrequest import AWSResponse
+
+    from conftest import REAL_NEW_CLIENT
+    from gooddays import sns_sender
+
+    class Raw:
+        def stream(self) -> Any:
+            yield (
+                b'<PublishResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">'
+                b"<PublishResult><MessageId>m-1</MessageId></PublishResult>"
+                b"<ResponseMetadata><RequestId>r</RequestId></ResponseMetadata>"
+                b"</PublishResponse>"
+            )
+
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "example-secret-key")
+    client = REAL_NEW_CLIENT("us-east-1")
+    # Answer at the HTTP step, so botocore's request-building and logging really run.
+    client.meta.events.register(
+        "before-send.sns.Publish",
+        lambda **kwargs: AWSResponse(
+            "https://sns.us-east-1.amazonaws.com/", 200, {}, Raw()
+        ),
+    )
+    monkeypatch.setattr(sns_sender, "_new_client", lambda region: client)
+
+    caplog.set_level(logging.DEBUG)  # the most verbose a user could ask for
+    assert main(send_args(folder)) == 0
+
+    assert "botocore" not in {record.name.split(".")[0] for record in caplog.records}
+    assert "Spot 0 hiking" not in caplog.text and SEND_BODY not in caplog.text
+    assert "example-secret-key" not in caplog.text
