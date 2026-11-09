@@ -9,8 +9,8 @@ Follow this workflow for any feature work. Its goal is code that looks like the 
 
 ## 1. Read before you write
 - Read `CLAUDE.md` in full. It sets the stack, non-goals, conventions, and guardrails. A feature that breaks a rule is wrong even if it works. In particular:
-  - Only build the stage named under "Current focus". Don't build later stages early.
-  - No AWS dependencies yet.
+  - Only build what "Current focus" in `CLAUDE.md` names, if it names one. Don't build later stages early.
+  - No AWS dependencies except `boto3` in `sns_sender.py` (Lambda, Step Functions and DynamoDB come later).
   - Don't add dependencies without asking the user first.
   - No hard-coded locations, thresholds, or settings; they live in `spots.yaml`.
   - `fetch_conditions` only fetches and normalizes; it does no scoring or judgment.
@@ -41,7 +41,8 @@ There is no build step. Report the real results. If a check fails or you skipped
 From `CLAUDE.md` and the existing code:
 - Python 3.12, managed with `uv`; fully type-hinted and `mypy --strict` clean on `src/`.
 - `httpx` with explicit timeouts (never `requests`); stdlib dataclasses for models.
-- Retries: up to 3 attempts with exponential backoff on timeouts and 5xx only; never retry 4xx. Timeout is 10s per request; concurrency is capped at 5.
+- Retries: up to 3 attempts with exponential backoff on timeouts and 5xx only; never retry 4xx. Timeout is 10s per request; concurrency is capped at 5. Two documented exceptions in `CLAUDE.md`: the Claude SDK call (its own retries, 30s) and the SNS publish (botocore's retries off; at most 2 attempts, only connection failures and 5xx).
+- Tests never reach the network or AWS: fake the sender, or use botocore's `Stubber` / a `before-send` hook on a client from `conftest.REAL_NEW_CLIENT`. The Stubber skips botocore's HTTP layer, so use the hook when the test is about retries or logging.
 - One bad spot never fails the run: catch per-spot errors, record a `SpotError`, and keep going.
 - Log with the standard `logging` module in key=value style, never `print`.
 - Tests use `pytest` with `respx` for mocked HTTP; tests never hit the network. Async tests rely on `asyncio_mode = "auto"`.

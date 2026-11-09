@@ -187,3 +187,16 @@ class MessageFacts:
 class Message:
     body: str  # SMS text: plain ASCII, no subject
     source: Literal["ai", "fallback"]
+
+
+# --- Sending (send_notification) ---
+
+
+@dataclass(frozen=True, slots=True)
+class SendResult:
+    """What happened when we tried to send. Nothing is stored."""
+
+    accepted: bool  # the provider accepted it (not that it was delivered or read)
+    message_id: str | None
+    attempts: int  # tries made (a try that failed before any request left counts)
+    reason: str | None  # a short key when nothing was accepted

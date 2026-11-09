@@ -17,6 +17,7 @@ from gooddays.cli import main
 from gooddays.fetch.nws import ALERTS_URL
 from gooddays.fetch.open_meteo import FORECAST_URL
 from gooddays.message import MESSAGE_CAP, WriterError
+from gooddays.notify import SUBJECT, TOPIC_ENV, SendError
 from gooddays.storage import USER_AGENT_ENV_VAR
 from helpers import load_fixture
 
@@ -1040,3 +1041,484 @@ def test_message_help_mentions_the_key_and_no_ai() -> None:
 
     assert done.returncode == 0
     assert "--no-ai" in done.stdout and "ANTHROPIC_API_KEY" in done.stdout
+
+
+# --- send ---
+
+ARN = "arn:aws:sns:us-east-1:123456789012:good-days"
+# What the saved warm, dry run turns into without Claude (see the message tests).
+SEND_BODY = (
+    "Today Mon Jun 15:\n"
+    "Spot 0 hiking: 65 F, wind 5 mph, daylight 5:25-20:35\n"
+    "Tomorrow Tue Jun 16:\n"
+    "Spot 0 hiking: 65 F, wind 5 mph, daylight 5:25-20:36"
+)
+
+
+class FakeSender:
+    """A fake NotificationSender: each call returns the next outcome (an id or an error)."""
+
+    def __init__(self, *outcomes: str | SendError) -> None:
+        self.outcomes = list(outcomes) or ["msg-1"]
+        self.calls: list[tuple[str, str, str]] = []
+
+    def __call__(self, destination: str, subject: str, body: str) -> str:
+        self.calls.append((destination, subject, body))
+        outcome = self.outcomes[min(len(self.calls), len(self.outcomes)) - 1]
+        if isinstance(outcome, SendError):
+            raise outcome
+        return outcome
+
+
+def use_sender(monkeypatch: pytest.MonkeyPatch, sender: Any) -> None:
+    monkeypatch.setattr(cli, "sns_sender", lambda: sender)
+
+
+def forbid_sender(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden() -> Any:
+        raise AssertionError("the notification sender must not be built here")
+
+    monkeypatch.setattr(cli, "sns_sender", forbidden)
+
+
+def send_args(folder: Path, *extra: str) -> list[str]:
+    return ["send", "--no-ai", "--fixtures", str(folder), *extra]
+
+
+def test_send_publishes_the_text_once_unchanged(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    sender = FakeSender("msg-777")
+    use_sender(monkeypatch, sender)
+
+    with caplog.at_level(logging.INFO):
+        assert main(send_args(folder)) == 0
+
+    out, err = capsys.readouterr()
+    assert sender.calls == [(ARN, SUBJECT, SEND_BODY)]
+    assert out.splitlines()[:-1] == SEND_BODY.splitlines()  # the text, then the status
+    assert out.splitlines()[-1] == (
+        "sent to arn:aws:sns:us-east-1:********9012:good-days (accepted by SNS, not "
+        "confirmed delivered; only confirmed subscribers get the email; "
+        "id=msg-777, attempts=1)"
+    )
+    assert "every confirmed subscriber gets this email" in err
+    assert "running this again sends the same text again" in err
+    # The full AWS account id and the body stay out of every output and log.
+    everything = out + err + caplog.text
+    assert "123456789012" not in everything
+    assert SEND_BODY not in caplog.text
+
+
+def test_send_dry_run_prints_the_text_and_needs_nothing(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    forbid_sender(monkeypatch)  # no sender, no topic, no AWS credentials
+
+    assert main(send_args(folder, "--dry-run")) == 0
+
+    out, err = capsys.readouterr()
+    assert out.rstrip("\n") == SEND_BODY
+    assert f"dry run: not sent (subject: {SUBJECT!r})" in err
+
+
+def test_send_dry_run_is_allowed_in_ci(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    forbid_sender(monkeypatch)
+    monkeypatch.setenv("CI", "true")
+
+    assert main(send_args(folder, "--dry-run")) == 0
+    assert capsys.readouterr().out.rstrip("\n") == SEND_BODY
+
+
+@pytest.mark.parametrize("value", ["true", "1", "false"])  # any non-empty value counts
+def test_send_refuses_to_send_for_real_in_ci(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    forbid_sender(monkeypatch)
+    monkeypatch.setenv("CI", value)
+
+    assert main(send_args(folder)) == 2
+
+    assert "refusing to send a real email when CI is set" in capsys.readouterr().err
+
+
+def test_send_with_nothing_to_send_sends_nothing_and_needs_no_settings(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forbid_sender(
+        monkeypatch
+    )  # no good days: no sender, and the topic is not even read
+    folder = write_saved_run(project / "saved")
+
+    assert main(send_args(folder)) == 0
+
+    assert capsys.readouterr().out == "nothing to send\n"
+
+
+def test_send_when_every_spot_failed_exits_1_and_sends_nothing(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    forbid_sender(monkeypatch)
+    (project / "empty").mkdir()
+
+    assert main(send_args(project / "empty")) == 1
+
+    assert capsys.readouterr().out == "nothing to send\n"
+
+
+def test_send_without_a_topic_exits_2_naming_the_setting(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    forbid_sender(monkeypatch)
+
+    assert main(send_args(folder)) == 2
+
+    assert TOPIC_ENV in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "my-topic",
+        "arn:aws:sns:us-west-2:210987654321:",
+        "arn:aws:sqs:us-west-2:210987654321:q",
+        "call me",
+    ],
+)
+def test_send_with_an_invalid_topic_exits_2_without_echoing_it(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    bad: str,
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, bad)
+    forbid_sender(monkeypatch)
+
+    assert main(send_args(folder)) == 2
+
+    out, err = capsys.readouterr()
+    assert TOPIC_ENV in err and bad not in out + err
+
+
+def test_send_without_aws_credentials_exits_2_before_anything_is_sent(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    use_sender(monkeypatch, FakeSender(SendError("no_credentials")))
+
+    assert main(send_args(folder)) == 2
+
+    out, err = capsys.readouterr()
+    assert (
+        "no AWS credentials found" in err
+        and "AWS_PROFILE" in err
+        and "nothing was sent" in err
+    )
+    assert "sent to" not in out
+
+
+def test_forgetting_to_fake_the_sender_cannot_publish_for_real(
+    project: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Everything is configured but the test did not fake the sender: the autouse
+    # guard stops it before any client exists (an unexpected error, exit 70).
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+
+    with caplog.at_level(logging.ERROR):
+        assert main(send_args(folder)) == 70
+
+    assert "fake the sender" in caplog.text
+
+
+def test_send_failure_prints_the_text_and_exits_4(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    sender = FakeSender(SendError("unavailable", retryable=True))
+    use_sender(monkeypatch, sender)
+
+    assert main(send_args(folder)) == 4
+
+    out, err = capsys.readouterr()
+    assert out.rstrip("\n") == SEND_BODY  # the text is not lost
+    assert "error: email not sent (reason=unavailable, attempts=2)" in err
+    assert len(sender.calls) == 2  # one retry, then it gives up
+    assert "sent to" not in out
+
+
+def test_send_failure_after_a_read_timeout_says_it_may_have_arrived(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    sender = FakeSender(SendError("read_timeout"))
+    use_sender(monkeypatch, sender)
+
+    assert main(send_args(folder)) == 4
+
+    err = capsys.readouterr().err
+    assert (
+        "reason=read_timeout, attempts=1" in err
+        and "may still have been delivered" in err
+    )
+    assert len(sender.calls) == 1  # never retried: it could notify twice
+
+
+def test_send_succeeds_after_a_retry(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    use_sender(
+        monkeypatch, FakeSender(SendError("connection_error", retryable=True), "msg-5")
+    )
+
+    assert main(send_args(folder)) == 0
+
+    assert "id=msg-5, attempts=2" in capsys.readouterr().out
+
+
+def test_send_end_to_end_through_the_real_adapter_with_a_scripted_aws(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from botocore.stub import Stubber
+
+    from conftest import REAL_NEW_CLIENT
+    from gooddays import sns_sender
+
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    client = REAL_NEW_CLIENT(
+        "us-east-1"
+    )  # a real boto3 client, scripted by the stubber
+    stubber = Stubber(client)
+    stubber.add_response(
+        "publish",
+        {"MessageId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+        {"TopicArn": ARN, "Subject": SUBJECT, "Message": SEND_BODY},
+    )
+    stubber.activate()
+    monkeypatch.setattr(sns_sender, "_new_client", lambda region: client)
+
+    with caplog.at_level(logging.INFO):
+        assert main(send_args(folder)) == 0
+
+    stubber.assert_no_pending_responses()
+    out, err = capsys.readouterr()
+    assert "id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee, attempts=1" in out
+    assert "123456789012" not in out + err + caplog.text
+
+
+def test_send_when_aws_refuses_exits_4_and_keeps_the_text(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from botocore.stub import Stubber
+
+    from conftest import REAL_NEW_CLIENT
+    from gooddays import sns_sender
+
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    client = REAL_NEW_CLIENT("us-east-1")
+    stubber = Stubber(client)
+    stubber.add_client_error(
+        "publish", service_error_code="AuthorizationError", http_status_code=403
+    )
+    stubber.activate()
+    monkeypatch.setattr(sns_sender, "_new_client", lambda region: client)
+
+    assert main(send_args(folder)) == 4
+
+    out, err = capsys.readouterr()
+    assert out.rstrip("\n") == SEND_BODY
+    assert "reason=auth_rejected, attempts=1" in err
+
+
+def test_message_never_builds_a_sender(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    forbid_sender(monkeypatch)
+
+    assert main(["message", "--no-ai", "--fixtures", str(folder)]) == 0
+
+
+def test_send_unexpected_error_exits_70(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def explode(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(cli, "generate_message", explode)
+    folder = write_warm_dry_run(project / "saved")
+
+    assert main(send_args(folder, "--dry-run")) == 70
+
+
+def test_send_with_bad_thresholds_exits_2_before_anything_is_sent(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (project / "spots.yaml").write_text(
+        SPOTS_YAML.replace("max_rain_in: 0", "max_rain_in: -1")
+    )
+    forbid_sender(monkeypatch)
+
+    assert main(["send", "--no-ai", "--dry-run"]) == 2
+
+    assert (
+        "config error: thresholds.cross_country_skiing.max_rain_in"
+        in capsys.readouterr().err
+    )
+
+
+def test_send_fixtures_must_be_a_directory(project: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["send", "--fixtures", str(project / "nope")])
+
+    assert exc.value.code == 2
+
+
+def test_send_help_describes_the_real_publish_and_exit_code_4(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["send", "--help"])
+
+    out = " ".join(capsys.readouterr().out.split())
+    assert exc.value.code == 0
+    for text in (
+        "--dry-run",
+        TOPIC_ENV,
+        "AWS_PROFILE",
+        "CONFIRMED subscriber",
+        "4 when the text",
+    ):
+        assert text in out
+
+
+@pytest.mark.parametrize("command", ["fetch", "score", "message"])
+def test_other_commands_never_import_boto3(project: Path, command: str) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    extra = ["--no-ai"] if command == "message" else []
+    code = (
+        "import sys\n"
+        "from gooddays.cli import main\n"
+        f"code = main([{command!r}, *{extra!r}, '--fixtures', {str(folder)!r}])\n"
+        "print('CODE', code, 'boto3' in sys.modules, 'gooddays.sns_sender' in sys.modules)\n"
+    )
+
+    done = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+
+    assert "CODE 0 False False" in done.stdout, done.stderr
+
+
+def test_noisy_libraries_are_held_at_warning(project: Path) -> None:
+    folder = write_warm_dry_run(project / "saved")
+
+    assert main(send_args(folder, "--dry-run")) == 0
+
+    for name in ("httpx", "httpcore", "botocore", "boto3", "urllib3"):
+        assert logging.getLogger(name).level == logging.WARNING, name
+
+
+def test_even_at_debug_the_real_adapter_never_logs_the_message(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from botocore.awsrequest import AWSResponse
+
+    from conftest import REAL_NEW_CLIENT
+    from gooddays import sns_sender
+
+    class Raw:
+        def stream(self) -> Any:
+            yield (
+                b'<PublishResponse xmlns="http://sns.amazonaws.com/doc/2010-03-31/">'
+                b"<PublishResult><MessageId>m-1</MessageId></PublishResult>"
+                b"<ResponseMetadata><RequestId>r</RequestId></ResponseMetadata>"
+                b"</PublishResponse>"
+            )
+
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "example-secret-key")
+    client = REAL_NEW_CLIENT("us-east-1")
+    # Answer at the HTTP step, so botocore's request-building and logging really run.
+    client.meta.events.register(
+        "before-send.sns.Publish",
+        lambda **kwargs: AWSResponse(
+            "https://sns.us-east-1.amazonaws.com/", 200, {}, Raw()
+        ),
+    )
+    monkeypatch.setattr(sns_sender, "_new_client", lambda region: client)
+
+    caplog.set_level(logging.DEBUG)  # the most verbose a user could ask for
+    assert main(send_args(folder)) == 0
+
+    assert "botocore" not in {record.name.split(".")[0] for record in caplog.records}
+    assert "Spot 0 hiking" not in caplog.text and SEND_BODY not in caplog.text
+    assert "example-secret-key" not in caplog.text
+
+
+def test_send_with_unusable_aws_settings_exits_2_with_a_clear_message(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    use_sender(monkeypatch, FakeSender(SendError("bad_aws_config")))
+
+    assert main(send_args(folder)) == 2
+
+    out, err = capsys.readouterr()
+    assert "your AWS settings are not usable" in err and "AWS_PROFILE" in err
+    assert "nothing was sent" in err and "sent to" not in out
+
+
+def test_send_with_an_unknown_aws_profile_is_a_config_error_not_a_crash(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    real_aws_client: Any,
+) -> None:
+    # The README used to suggest AWS_PROFILE=default with environment keys; with no
+    # such profile on disk botocore refuses it while building the client.
+    folder = write_warm_dry_run(project / "saved")
+    real_aws_client()  # the real adapter and boto3 client (building fails before any request)
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    monkeypatch.setenv("AWS_PROFILE", "default")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "example-secret-key")
+
+    assert main(send_args(folder)) == 2
+
+    out, err = capsys.readouterr()
+    assert "your AWS settings are not usable" in err and "nothing was sent" in err
+    assert "Traceback" not in err and "example-secret-key" not in out + err
