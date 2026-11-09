@@ -1108,7 +1108,7 @@ def test_send_publishes_the_text_once_unchanged(
         "id=msg-777, attempts=1)"
     )
     assert "every confirmed subscriber gets this email" in err
-    assert "running this again sends the same text again" in err
+    assert "sends the same text again" not in err  # repeats are skipped now
     # The full AWS account id and the body stay out of every output and log.
     everything = out + err + caplog.text
     assert "123456789012" not in everything
@@ -1373,7 +1373,7 @@ def test_send_unexpected_error_exits_70(
     def explode(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(cli, "generate_message", explode)
+    monkeypatch.setattr(cli, "message_from_facts", explode)
     folder = write_warm_dry_run(project / "saved")
 
     assert main(send_args(folder, "--dry-run")) == 70

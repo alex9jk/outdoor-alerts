@@ -27,6 +27,7 @@ from gooddays.message import (
     facts_json,
     footer_text,
     generate_message,
+    message_from_facts,
     snow_text,
     temperature_text,
     validate_text,
@@ -104,6 +105,7 @@ class FakeWriter:
 
 def entry(**overrides: Any) -> GoodEntry:
     base: dict[str, Any] = {
+        "spot_id": "spot-a",
         "spot_name": "Spot A",
         "activity": "hiking",
         "day": TODAY,
@@ -435,6 +437,7 @@ def test_fallback_text_format() -> None:
 def long_facts(count: int = 6) -> MessageFacts:
     entries = tuple(
         entry(
+            spot_id=f"spot-{chr(97 + i)}",
             spot_name=f"Spot {chr(65 + i)}",
             activity="downhill_skiing",
             snow_depth_in=12.0,
@@ -911,3 +914,36 @@ def test_the_footer_is_kept_when_entries_are_dropped_to_fit() -> None:
 
     assert text.endswith("1 spot couldn't be checked")
     assert text.splitlines()[0]  # never empty, always names something
+
+
+# --- which entries a message counts as covered (what `send` records as sent) ---
+
+
+def test_covered_is_every_entry_when_claude_names_them_all() -> None:
+    message = run([conditions("a", "Warm Park")], writer=FakeWriter(GOOD_TEXT))
+
+    assert message is not None and message.source == "ai"
+    assert [key.spot_id for key in message.covered] == ["a", "a"]  # today and tomorrow
+    assert len({key.day for key in message.covered}) == 2
+
+
+def test_covered_in_a_shortened_fallback_is_only_the_entries_shown() -> None:
+    facts = long_facts(6)
+    spots = [spot(e.spot_id, e.spot_name, e.activity) for e in facts.entries]
+
+    message = message_from_facts(facts, spots, None, max_chars=160)
+
+    shown = len(message.covered)
+    assert 1 <= shown < 6
+    assert message.covered == tuple(e.key for e in facts.entries[:shown])
+    assert f"+{6 - shown} more" in message.body
+
+
+def test_covered_is_empty_when_the_text_is_only_a_count() -> None:
+    facts = long_facts(40)
+    spots = [spot(e.spot_id, e.spot_name, e.activity) for e in facts.entries]
+
+    message = message_from_facts(facts, spots, None, max_chars=MIN_CAP)
+
+    assert "too many to list" in message.body
+    assert message.covered == ()

@@ -194,7 +194,9 @@ def test_the_retry_loop_makes_two_tries_in_total_and_no_more(
     monkeypatch.setattr(sns_sender, "_new_client", lambda region: client)
 
     with pytest.raises(SendError) as exc:
-        send_notification(Message(body=BODY, source="ai"), ARN, sns_email_sender())
+        send_notification(
+            Message(body=BODY, source="ai", covered=()), ARN, sns_email_sender()
+        )
 
     assert len(tries) == 2 and exc.value.attempts == 2
 
@@ -331,7 +333,9 @@ def test_aws_error_text_and_identifiers_never_reach_errors_or_logs(
 
     caplog.set_level(logging.DEBUG)
     with pytest.raises(SendError) as exc:
-        send_notification(Message(body=BODY, source="ai"), ARN, sns_email_sender())
+        send_notification(
+            Message(body=BODY, source="ai", covered=()), ARN, sns_email_sender()
+        )
 
     shown = f"{exc.value!s} {exc.value!r} {exc.value.reason} {caplog.text}"
     assert "123456789012" not in shown and "not authorized" not in shown

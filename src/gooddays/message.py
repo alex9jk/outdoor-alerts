@@ -139,6 +139,7 @@ def _entry(
     winds = _present(hours, lambda h: h.wind_speed_mph)
     depths = _present(daylight, lambda h: h.snow_depth_in)
     return GoodEntry(
+        spot_id=spot.id,
         spot_name=_clean(spot.name) or spot.id,
         activity=activity,
         day=day,
@@ -332,22 +333,27 @@ def _day_groups(lowered: str) -> dict[str, str]:
 
 def build_fallback(facts: MessageFacts, max_chars: int) -> str:
     """Deterministic text. Shrinks detail, then entries, to stay within `max_chars`."""
+    return _fallback_text(facts, max_chars)[0]
+
+
+def _fallback_text(facts: MessageFacts, max_chars: int) -> tuple[str, int]:
+    """The fallback text and how many of the entries (from the front) it names."""
     footer = footer_text(facts.unchecked_spots)
+    count = len(facts.entries)
     # Detail 3 is everything; each step drops alerts, then daylight, then snow.
     for detail in (3, 2, 1, 0):
         text = _render(facts.entries, detail, 0, footer)
         if len(text) <= max_chars:
-            return text
+            return text, count
     # Keep at least one entry, so the text always names something.
-    for dropped in range(1, len(facts.entries)):
-        text = _render(
-            facts.entries[: len(facts.entries) - dropped], 0, dropped, footer
-        )
+    for dropped in range(1, count):
+        shown = count - dropped
+        text = _render(facts.entries[:shown], 0, dropped, footer)
         if len(text) <= max_chars:
-            return text
-    count = len(facts.entries)
+            return text, shown
     summary = f"{count} good {'outing' if count == 1 else 'outings'} (too many to list)"
-    return f"{summary}\n{footer}" if footer else summary
+    # This summary names no entry, so none of them counts as sent.
+    return (f"{summary}\n{footer}" if footer else summary), 0
 
 
 def _render(
@@ -390,15 +396,32 @@ def generate_message(
 ) -> Message | None:
     """One SMS digest of the good days, or None when there is nothing to send.
 
-    With no `writer` the fallback text is used (no AI call is made). The AI is
-    also skipped when the entries cannot all fit even in the shortest form, since
-    it could not list them all either.
+    With no `writer` the fallback text is used (no AI call is made).
     """
     if max_chars < MIN_CAP:
         raise ValueError(f"max_chars must be at least {MIN_CAP}, got {max_chars}")
     facts = build_facts(spots, scores, conditions, errors, timezone)
     if not facts.entries:
         return None  # nothing good: no message and, importantly, no AI call
+    return message_from_facts(facts, spots, writer, max_chars)
+
+
+def message_from_facts(
+    facts: MessageFacts,
+    spots: Sequence[Spot],
+    writer: MessageWriter | None = None,
+    max_chars: int = MESSAGE_CAP,
+) -> Message:
+    """The digest for these facts (which must have at least one entry).
+
+    The AI is skipped when the entries cannot all fit even in the shortest form,
+    since it could not list them all either. `Message.covered` says which entries
+    the text names.
+    """
+    if max_chars < MIN_CAP:
+        raise ValueError(f"max_chars must be at least {MIN_CAP}, got {max_chars}")
+    if not facts.entries:
+        raise ValueError("message_from_facts needs at least one entry")
 
     footer = footer_text(facts.unchecked_spots)
     body_limit = max_chars - (len(footer) + 1 if footer else 0)
@@ -424,7 +447,13 @@ def generate_message(
         # Only the kinds are logged (not names or numbers from the facts).
         kinds = sorted({problem.split(":")[0] for problem in problems})
         return _fallback(facts, max_chars, f"invalid:{','.join(kinds)}")
-    return Message(body=f"{text}\n{footer}" if footer else text, source="ai")
+    return Message(
+        body=f"{text}\n{footer}" if footer else text,
+        source="ai",
+        covered=tuple(
+            entry.key for entry in facts.entries
+        ),  # validation named every one
+    )
 
 
 def _fallback(
@@ -442,4 +471,6 @@ def _fallback(
         len(facts.entries),
         exc_info=error,  # an unexpected writer exception gets its traceback
     )
-    return Message(body=build_fallback(facts, max_chars), source="fallback")
+    body, shown = _fallback_text(facts, max_chars)
+    covered = tuple(entry.key for entry in facts.entries[:shown])
+    return Message(body=body, source="fallback", covered=covered)
