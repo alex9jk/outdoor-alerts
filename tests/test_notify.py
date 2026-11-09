@@ -19,7 +19,7 @@ from gooddays.storage import ConfigError
 
 ARN = "arn:aws:sns:us-east-1:123456789012:good-days"
 BODY = "Today Mon Jun 15:\nSpot 0 hiking: 65 F, wind 5 mph"
-MESSAGE = Message(body=BODY, source="fallback")
+MESSAGE = Message(body=BODY, source="fallback", covered=())
 
 
 class FakeSender:

@@ -12,8 +12,21 @@ from zoneinfo import ZoneInfo
 
 from gooddays.fetch.raw import RawSnapshot, read_fetch_time, replay_fetchers
 from gooddays.fetch.service import Fetchers, fetch_conditions
-from gooddays.message import MessageWriter, generate_message
-from gooddays.models import FetchResult, Message, ScoreResult, Settings, Spot
+from gooddays.message import (
+    MessageWriter,
+    build_facts,
+    generate_message,
+    message_from_facts,
+)
+from gooddays.models import (
+    EntryKey,
+    FetchResult,
+    GoodEntry,
+    Message,
+    ScoreResult,
+    Settings,
+    Spot,
+)
 from gooddays.notify import (
     SUBJECT,
     TOPIC_ENV,
@@ -25,11 +38,19 @@ from gooddays.notify import (
 )
 from gooddays.report import score_to_json, score_to_text, to_json, to_text
 from gooddays.score import score_conditions
+from gooddays.sent import (
+    LocalSentStore,
+    SentLockError,
+    SentStore,
+    describe_skipped,
+    split_sent,
+)
 from gooddays.storage import ConfigError, LocalStorage
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_RAW_ROOT = Path("data/raw")
+DEFAULT_SENT_PATH = Path("data/sent.json")
 
 # Exit codes. 1 is reserved for "every spot failed", so crashes use other codes.
 EXIT_OK = 0
@@ -125,9 +146,10 @@ def build_parser() -> argparse.ArgumentParser:
             "emails every CONFIRMED subscriber. Publishing is real and cannot be "
             "undone: use --dry-run to print instead. Set GOODDAYS_SNS_TOPIC_ARN (your "
             "topic) and AWS credentials the usual way (AWS_ACCESS_KEY_ID and "
-            "AWS_SECRET_ACCESS_KEY, or AWS_PROFILE). Nothing is stored, so running it "
-            "again sends the same text again. Exit codes as for score, plus 4 when the "
-            "text could not be sent (the text is still printed)."
+            "AWS_SECRET_ACCESS_KEY, or AWS_PROFILE). Each good day is emailed once: "
+            "sent days are remembered in --state and left out of later emails "
+            "(delete that file to forget them). Exit codes as for score, plus 4 when "
+            "the text could not be sent (the text is still printed)."
         ),
     )
     _add_spots_option(send)
@@ -146,6 +168,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="print the text instead of sending it (needs no topic or AWS account)",
+    )
+    send.add_argument(
+        "--state",
+        type=Path,
+        default=DEFAULT_SENT_PATH,
+        metavar="PATH",
+        help=f"record of already-sent days (default: {DEFAULT_SENT_PATH})",
+    )
+    send.add_argument(
+        "--resend",
+        action="store_true",
+        help="include days already sent (and record any not yet recorded)",
     )
     return parser
 
@@ -212,7 +246,8 @@ def _run(argv: Sequence[str] | None) -> int:
         if args.command == "send":
             return _send(args, settings, spots, storage)
     except ConfigError as e:  # the thresholds are checked before anything is fetched
-        print(f"config error: {e}", file=sys.stderr)
+        label = "error" if isinstance(e, SentLockError) else "config error"
+        print(f"{label}: {e}", file=sys.stderr)
         return EXIT_USAGE_OR_CONFIG
     raise AssertionError(f"unhandled command: {args.command!r}")
 
@@ -259,18 +294,30 @@ def _message_run(
     settings: Settings,
     spots: list[Spot],
     storage: LocalStorage,
-) -> tuple[FetchResult, Message | None]:
-    """Fetch, score and write the message (shared by `message` and `send`)."""
+    already_sent: frozenset[EntryKey] | None = None,
+) -> tuple[FetchResult, Message | None, tuple[GoodEntry, ...]]:
+    """Fetch, score and write the message (shared by `message` and `send`).
+
+    With `already_sent`, those entries are left out of the message (and returned as
+    the third value); without it the message covers every good day.
+    """
     result, scores = _score_run(args, settings, spots, storage)
-    message = generate_message(
-        spots,
-        scores,
-        result.results,
-        result.errors,
-        settings.timezone,
-        writer=None if args.no_ai else anthropic_writer(),
-    )
-    return result, message
+    writer = None if args.no_ai else anthropic_writer()
+    if already_sent is None:
+        message = generate_message(
+            spots,
+            scores,
+            result.results,
+            result.errors,
+            settings.timezone,
+            writer=writer,
+        )
+        return result, message, ()
+    facts = build_facts(spots, scores, result.results, result.errors, settings.timezone)
+    facts, skipped = split_sent(facts, already_sent)
+    # Nothing new means no message and no Claude call (and no footer on its own).
+    message = message_from_facts(facts, spots, writer) if facts.entries else None
+    return result, message, skipped
 
 
 def _all_spots_failed(result: FetchResult) -> bool:
@@ -283,7 +330,7 @@ def _message(
     spots: list[Spot],
     storage: LocalStorage,
 ) -> int:
-    result, message = _message_run(args, settings, spots, storage)
+    result, message, _ = _message_run(args, settings, spots, storage)
     _emit(message.body if message is not None else "nothing to send")
     return EXIT_ALL_SPOTS_FAILED if _all_spots_failed(result) else EXIT_OK
 
@@ -315,7 +362,37 @@ def _send(
     spots: list[Spot],
     storage: LocalStorage,
 ) -> int:
-    result, message = _message_run(args, settings, spots, storage)
+    store = LocalSentStore(args.state)
+    if args.dry_run:  # reads the record but never writes, creates or locks anything
+        store.check_writable(create=False)
+        return _send_locked(args, settings, spots, storage, store)
+    # The record is checked and locked before anything is fetched or sent, so a
+    # problem with it (exit 2) never comes after an email went out.
+    with store.lock():
+        store.check_writable()
+        return _send_locked(args, settings, spots, storage, store)
+
+
+def _send_locked(
+    args: argparse.Namespace,
+    settings: Settings,
+    spots: list[Spot],
+    storage: LocalStorage,
+    store: LocalSentStore,
+) -> int:
+    already_sent = store.sent_keys()  # ConfigError (exit 2) if the file is unusable
+    result, message, skipped = _message_run(
+        args,
+        settings,
+        spots,
+        storage,
+        frozenset() if args.resend else already_sent,
+    )
+    if skipped:
+        print(
+            f"skipped {len(skipped)} already sent: {describe_skipped(skipped)}",
+            file=sys.stderr,
+        )
     # "nothing to send" can mean no good days or every spot failing: the exit code
     # tells them apart, so follow the failure, not the text.
     if message is None:
@@ -337,8 +414,7 @@ def _send(
     topic = parse_topic_arn(os.environ.get(TOPIC_ENV))  # ConfigError -> exit 2
     masked = mask_topic(topic)
     print(
-        f"warning: publishing to {masked}; every confirmed subscriber gets this email, "
-        "and nothing is stored, so running this again sends the same text again",
+        f"warning: publishing to {masked}; every confirmed subscriber gets this email",
         file=sys.stderr,
     )
     try:
@@ -350,7 +426,7 @@ def _send(
                 file=sys.stderr,
             )
             return EXIT_USAGE_OR_CONFIG
-        _emit(message.body)  # the text is not lost
+        _emit(message.body)  # the text is not lost; nothing is recorded as sent
         note = (
             " (it may still have been delivered)"
             if error.reason == "read_timeout"
@@ -362,12 +438,30 @@ def _send(
             file=sys.stderr,
         )
         return EXIT_SEND_FAILED
+    # Record before printing anything: a closed stdout (BrokenPipeError) would
+    # otherwise skip it and the same days would be emailed again.
+    _record_sent(store, message, sent.message_id or "", settings.timezone)
     _emit(message.body)
     _emit(
         f"sent to {masked} (accepted by SNS, not confirmed delivered; only confirmed "
         f"subscribers get the email; id={sent.message_id}, attempts={sent.attempts})"
     )
     return EXIT_OK
+
+
+def _record_sent(
+    store: SentStore, message: Message, message_id: str, timezone: str
+) -> None:
+    """Remember what was emailed. The email is already out, so a failure only warns."""
+    now = datetime.now(ZoneInfo(timezone))
+    try:
+        store.record(message.covered, now, message_id, now.date())
+    except (ConfigError, OSError) as e:
+        print(
+            f"WARNING: the email was sent but could not be recorded ({e}); the next "
+            "run may email the same days again",
+            file=sys.stderr,
+        )
 
 
 def _fetch(args: argparse.Namespace, settings: Settings, spots: list[Spot]) -> int:

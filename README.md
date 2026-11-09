@@ -85,7 +85,7 @@ email arrived. The email comes from AWS, as plain text with an unsubscribe foote
 uv run python -m gooddays fetch   [--save-raw | --fixtures DIR] [--raw-root DIR] [--json] [--spots FILE]
 uv run python -m gooddays score   [--fixtures DIR] [--json] [--spots FILE]
 uv run python -m gooddays message [--fixtures DIR] [--no-ai] [--spots FILE]
-uv run python -m gooddays send    [--fixtures DIR] [--no-ai] [--dry-run] [--spots FILE]
+uv run python -m gooddays send    [--fixtures DIR] [--no-ai] [--dry-run] [--state PATH] [--resend] [--spots FILE]
 ```
 
 - `fetch` prints the normalized conditions for every spot.
@@ -94,7 +94,9 @@ uv run python -m gooddays send    [--fixtures DIR] [--no-ai] [--dry-run] [--spot
   "nothing to send".
 - `send` does what `message` does, then emails the result through SNS. It is a real
   publish unless you pass `--dry-run`; it refuses to send when the `CI` environment
-  variable is set. Nothing is stored, so running it again sends the same email again.
+  variable is set. Each good day is emailed once: sent days are remembered in
+  `data/sent.json` (`--state PATH`) and left out of later emails, so running it again says
+  `nothing to send`. Delete that file to forget them, or pass `--resend` to include them.
 - `--save-raw` (fetch only) also writes raw API responses to
   `data/raw/<date>/<spot_id>/` (git-ignored).
 - `--fixtures DIR` replays a folder written by `--save-raw` instead of calling the APIs,
@@ -131,6 +133,7 @@ src/gooddays/
   ai_writer.py     # Claude-backed message writer (only module using the Anthropic SDK)
   notify.py        # send_notification(): topic checks and the narrow retry
   sns_sender.py    # the AWS SNS publisher (the only boto3 user)
+  sent.py          # record of already-emailed days (data/sent.json)
   report.py        # text and JSON output
   cli.py           # python -m gooddays ...
 tests/

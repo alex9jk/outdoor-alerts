@@ -1,15 +1,24 @@
 import logging
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import boto3
 import pytest
 
-from gooddays import notify, sns_sender
+from gooddays import cli, notify, sns_sender
 from gooddays.fetch import http
 
 # The real client factory, kept so adapter tests can opt back in.
 REAL_NEW_CLIENT = sns_sender._new_client
+
+
+@pytest.fixture(autouse=True)
+def sent_record_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep `send` from ever reading or writing the real data/sent.json."""
+    path = tmp_path / "state" / "sent.json"
+    monkeypatch.setattr(cli, "DEFAULT_SENT_PATH", path)
+    return path
 
 
 @pytest.fixture(autouse=True)

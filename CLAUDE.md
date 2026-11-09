@@ -34,12 +34,13 @@ dependencies for now.
 ```
 src/gooddays/
   models.py        # Spot, HourlyConditions, Alert, SpotConditions, Thresholds, ScoreResult,
-                   # GoodEntry, MessageFacts, Message, SendResult
+                   # EntryKey, GoodEntry, MessageFacts, Message, SendResult
   storage.py       # Storage protocol + LocalStorage (reads spots.yaml)
   score.py         # score_conditions(): pass/fail per spot, activity and day
   message.py       # generate_message(): one SMS digest of the good days (pure parts)
   notify.py        # send_notification(): topic checks, subject, narrow retry (pure parts)
   sns_sender.py    # the AWS SNS publisher (the only boto3 user)
+  sent.py          # SentStore protocol + LocalSentStore (JSON record of emailed days)
   ai_writer.py     # the Claude writer behind generate_message (the only SDK user)
   fetch/
     open_meteo.py  # forecast client
@@ -182,10 +183,35 @@ short digest as before (the SMS-sized text, now carried by an email with a fixed
 - **Failure**: exit 4, the text is still printed, and a short reason key (`unavailable`,
   `read_timeout`, `auth_rejected`, `topic_not_found`, `throttled`, `rejected`, ...). AWS error
   text is never kept; only the error code and HTTP status are used.
-- **Repeats**: nothing is stored, so running it again emails the same text again; a warning
-  says so. Dedup is deferred (a later design should key on day, spot and activity, not on the
-  text, because Claude's wording changes).
-- **Tests** can never publish: an autouse fixture makes the real client impossible, clears
+- **Repeats (dedup)**: each good day is emailed at most once ever. An entry is spot id +
+  activity + absolute local date (`EntryKey`), never the wording or the "today"/"tomorrow"
+  label. Going good, bad, good again does not notify again.
+  - `send` drops entries already recorded *before* the text is written, so the digest holds
+    only new days. Nothing new means `nothing to send`, exit 0, no Claude call, no publish.
+    A note on stderr lists what was skipped (`skipped 2 already sent: ...`).
+  - The record is `data/sent.json` (`--state PATH`; git-ignored via `/data/`): version 1,
+    `{"entries": [{spot_id, activity, date, sent_at, message_id}]}`. Never the topic, email
+    address, credentials or the text. Entries older than 7 days are pruned when something is
+    recorded. Deleting the file forgets everything; there is no list or clear command.
+  - What gets recorded is what the text *named* (`Message.covered`): an AI text names every
+    entry, a shortened fallback only the ones shown (the rest are still new next time), and a
+    "too many to list" summary names none.
+  - Recorded right after SNS accepts the publish and before anything is printed (a closed
+    stdout would otherwise skip it). A failed send, or an unknown outcome (read timeout),
+    records nothing. If recording fails after an accepted send, a loud stderr warning says the
+    next run may repeat it, and the exit stays 0.
+  - The record is read, checked writable and locked BEFORE anything is fetched or sent. A
+    corrupt, unreadable or unwritable file is a config error (exit 2) naming the file, also
+    with `--dry-run`, which checks writability without creating anything. The lock (`fcntl`, a sibling `sent.json.lock`) is held through fetch,
+    Claude, publish and record; a second run waits up to 150 s, then exits 2 (a slow run can outlast that; nothing is sent twice). Without `fcntl`
+    (Windows) it runs unlocked with a logged warning. `--dry-run` reads the record but never
+    writes or locks it.
+  - `--resend` ignores the record when choosing entries (any not yet recorded are recorded after a
+    send). `message` is unfiltered and print-only. `LocalSentStore` sits behind the `SentStore`
+    protocol, separate from the read-only `Storage`; a DynamoDB version later is one
+    conditional write per key.
+- **Tests** can never publish or touch `data/sent.json`: an autouse fixture points
+  `cli.DEFAULT_SENT_PATH` at a per-test temp file, another makes the real client impossible, clears
   `CI`, the topic and the AWS settings, points AWS config files away and resets boto3's
   default session (it caches credentials across clients). Tests fake the sender, and the SNS
   adapter is tested with botocore's `Stubber` and a `before-send` hook that counts HTTP tries.
@@ -230,8 +256,9 @@ short digest as before (the SMS-sized text, now carried by an email with a fixed
   (fetches, scores, then prints one SMS text or `nothing to send`; needs `ANTHROPIC_API_KEY`
   unless `--no-ai`, and falls back to the code-built text if Claude can't be used; exit codes
   as for score).
-- Send: `uv run python -m gooddays send [--spots PATH] [--fixtures DIR] [--no-ai] [--dry-run]`
-  (a REAL email through SNS unless `--dry-run`; needs `GOODDAYS_SNS_TOPIC_ARN` and AWS
+- Send: `uv run python -m gooddays send [--spots PATH] [--fixtures DIR] [--no-ai] [--dry-run]
+  [--state PATH] [--resend]` (a REAL email through SNS unless `--dry-run`, and only for days
+  not already in the sent record; needs `GOODDAYS_SNS_TOPIC_ARN` and AWS
   credentials. Exit codes as for score, plus 4 when the text could not be sent; the text is
   still printed).
 - Test: `uv run pytest`

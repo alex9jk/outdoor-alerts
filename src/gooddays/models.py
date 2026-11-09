@@ -160,10 +160,21 @@ class ScoreResult:
 # --- Messages (generate_message) ---
 
 
+@dataclass(frozen=True, slots=True, order=True)
+class EntryKey:
+    """What identifies one good entry for good: not the words 'today'/'tomorrow'
+    (which shift every day) and not the message text (Claude's wording changes)."""
+
+    spot_id: str
+    activity: Activity
+    day: date  # the absolute local date, in the configured timezone
+
+
 @dataclass(frozen=True, slots=True)
 class GoodEntry:
     """One good spot/activity/day, with the numbers a message can mention."""
 
+    spot_id: str
     spot_name: str  # ASCII-only, so it can go straight into an SMS
     activity: Activity
     day: date
@@ -176,6 +187,10 @@ class GoodEntry:
     snow_depth_in: float | None  # only set for the skiing activities
     alert_notes: tuple[str, ...]  # non-severe alerts still active
 
+    @property
+    def key(self) -> EntryKey:
+        return EntryKey(self.spot_id, self.activity, self.day)
+
 
 @dataclass(frozen=True, slots=True)
 class MessageFacts:
@@ -187,6 +202,9 @@ class MessageFacts:
 class Message:
     body: str  # SMS text: plain ASCII, no subject
     source: Literal["ai", "fallback"]
+    # The entries the body actually names (an AI text names every entry; a shortened
+    # fallback may drop some to "+N more"). Only these count as sent.
+    covered: tuple[EntryKey, ...]
 
 
 # --- Sending (send_notification) ---

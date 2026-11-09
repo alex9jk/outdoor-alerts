@@ -101,6 +101,15 @@ def forbid_sender(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
 def use_message(monkeypatch: pytest.MonkeyPatch, message: Message | None) -> None:
     monkeypatch.setattr(cli, "generate_message", lambda *a, **k: message)
+    # `send` builds the message from the facts that are new since the last send.
+    monkeypatch.setattr(cli, "message_from_facts", lambda *a, **k: message)
+    if message is None:
+        real_build_facts = cli.build_facts
+
+        def no_entries(*args: Any, **kwargs: Any) -> Any:
+            return dataclasses.replace(real_build_facts(*args, **kwargs), entries=())
+
+        monkeypatch.setattr(cli, "build_facts", no_entries)
 
 
 # --- a real boto3 client answered by a before-send hook (no HTTP is ever sent) ---
@@ -546,7 +555,7 @@ def test_ac10_send_result_is_frozen_and_carries_the_four_fields() -> None:
         "reason",
     ]
     result = send_notification(
-        Message(body="x", source="fallback"), ARN, FakeSender("id-9")
+        Message(body="x", source="fallback", covered=()), ARN, FakeSender("id-9")
     )
     assert result == SendResult(
         accepted=True, message_id="id-9", attempts=1, reason=None
@@ -556,9 +565,10 @@ def test_ac10_send_result_is_frozen_and_carries_the_four_fields() -> None:
 
 
 @pytest.mark.parametrize("outcome", ["msg-1", SendError("auth_rejected")])
-def test_ac10_send_writes_no_files(
+def test_ac10_send_writes_only_its_sent_record(
     project: Path,
     good_run: Path,
+    sent_record_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     outcome: str | SendError,
 ) -> None:
@@ -568,14 +578,21 @@ def test_ac10_send_writes_no_files(
 
     main(send_args(good_run))
 
-    assert _tree(project) == before
+    after = _tree(project)
+    changed = {
+        Path(path)
+        for path in before.keys() | after.keys()
+        if before.get(path) != after.get(path)
+    }
+    state = sent_record_path.parent
+    assert all(path == state or state in path.parents for path in changed)
     assert not (project / "data").exists()
 
 
 # --- AC11: the repeat warning ---
 
 
-def test_ac11_a_real_send_warns_that_rerunning_sends_it_again(
+def test_ac11_a_real_send_warns_about_the_audience_not_about_repeats(
     good_run: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(TOPIC_ENV, ARN)
@@ -584,7 +601,8 @@ def test_ac11_a_real_send_warns_that_rerunning_sends_it_again(
     assert main(send_args(good_run)) == 0
 
     out, err = capsys.readouterr()
-    assert "warning:" in err and "running this again sends the same text again" in err
+    assert "warning:" in err and "every confirmed subscriber" in err
+    assert "sends the same text again" not in err  # repeats are now skipped
     assert "warning" not in out
 
 
@@ -700,7 +718,7 @@ def test_edge_a_306_character_body_is_published_as_is(
 ) -> None:
     body = ("Today Mon Jun 15: " + "a" * 288)[:306]
     assert len(body) == 306
-    use_message(monkeypatch, Message(body=body, source="ai"))
+    use_message(monkeypatch, Message(body=body, source="ai", covered=()))
     monkeypatch.setenv(TOPIC_ENV, ARN)
     sender = FakeSender("msg-1")
     use_sender(monkeypatch, sender)
@@ -714,7 +732,7 @@ def test_edge_a_306_character_body_is_published_as_is(
 def test_edge_ai_and_fallback_messages_are_sent_the_same_way(
     good_run: Path, monkeypatch: pytest.MonkeyPatch, source: str
 ) -> None:
-    use_message(monkeypatch, Message(body=BODY, source=source))  # type: ignore[arg-type]
+    use_message(monkeypatch, Message(body=BODY, source=source, covered=()))  # type: ignore[arg-type]
     monkeypatch.setenv(TOPIC_ENV, ARN)
     sender = FakeSender("msg-1")
     use_sender(monkeypatch, sender)
