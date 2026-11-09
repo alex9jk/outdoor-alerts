@@ -41,7 +41,8 @@ There is no build step. Report the real results. If a check fails or you skipped
 From `CLAUDE.md` and the existing code:
 - Python 3.12, managed with `uv`; fully type-hinted and `mypy --strict` clean on `src/`.
 - `httpx` with explicit timeouts (never `requests`); stdlib dataclasses for models.
-- Retries: up to 3 attempts with exponential backoff on timeouts and 5xx only; never retry 4xx. Timeout is 10s per request; concurrency is capped at 5.
+- Retries: up to 3 attempts with exponential backoff on timeouts and 5xx only; never retry 4xx. Timeout is 10s per request; concurrency is capped at 5. Two documented exceptions in `CLAUDE.md`: the Claude SDK call (its own retries, 30s) and the SNS publish (botocore's retries off; at most 2 attempts, only connection failures and 5xx).
+- Tests never reach the network or AWS: fake the sender, or use botocore's `Stubber` / a `before-send` hook on a client from `conftest.REAL_NEW_CLIENT`. The Stubber skips botocore's HTTP layer, so use the hook when the test is about retries or logging.
 - One bad spot never fails the run: catch per-spot errors, record a `SpotError`, and keep going.
 - Log with the standard `logging` module in key=value style, never `print`.
 - Tests use `pytest` with `respx` for mocked HTTP; tests never hit the network. Async tests rely on `asyncio_mode = "auto"`.

@@ -71,6 +71,11 @@ def test_a_missing_topic_names_the_setting(raw: str | None) -> None:
         "arn:aws:sns:us-east-1:123456789012:good days",  # a space
         f"{ARN}\nextra",  # fullmatch: a newline can't sneak through
         "https://example.com/arn",
+        "arn:aws:sns:us-east-1-:123456789012:good-days",  # a malformed region
+        "arn:aws:sns:-x:123456789012:good-days",
+        "arn:aws:sns:useast1:123456789012:good-days",
+        "arn:awsfake:sns:us-east-1:123456789012:good-days",  # not a real partition
+        "arn:aws:sns:us-east-1:123456789012:good-days.fifo",  # FIFO: no email
     ],
 )
 def test_an_invalid_topic_is_refused_without_echoing_it(raw: str) -> None:
@@ -94,6 +99,20 @@ def test_masking_hides_all_but_the_last_four_digits_of_the_account() -> None:
     assert masked == "arn:aws:sns:us-east-1:********9012:good-days"
     assert "123456789012" not in masked and "12345678" not in masked
     assert mask_topic("garbage") == "***"
+
+
+def test_masking_also_hides_the_account_digits_inside_the_topic_name() -> None:
+    tricky = "arn:aws:sns:us-east-1:123456789012:alerts-123456789012"
+
+    masked = mask_topic(tricky)
+
+    assert "123456789012" not in masked
+    assert masked == "arn:aws:sns:us-east-1:********9012:alerts-********9012"
+
+
+def test_the_error_for_a_fifo_topic_says_to_use_a_standard_topic() -> None:
+    with pytest.raises(ConfigError, match="not a FIFO topic"):
+        parse_topic_arn("arn:aws:sns:us-east-1:123456789012:good-days.fifo")
 
 
 def test_the_subject_follows_snss_email_rules() -> None:

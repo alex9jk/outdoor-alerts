@@ -5,15 +5,21 @@ from typing import Any
 import pytest
 from botocore.awsrequest import AWSResponse
 from botocore.exceptions import (
+    ConfigParseError,
     ConnectionClosedError,
     ConnectTimeoutError,
     CredentialRetrievalError,
     EndpointConnectionError,
+    InvalidConfigError,
+    InvalidRegionError,
     NoCredentialsError,
+    NoRegionError,
     PartialCredentialsError,
     ProfileNotFound,
     ReadTimeoutError,
     SSLError,
+    SSOTokenLoadError,
+    UnauthorizedSSOTokenError,
 )
 from botocore.stub import Stubber
 
@@ -174,7 +180,7 @@ def test_the_control_default_retries_would_have_made_several_tries(
     client = boto3.client("sns", region_name="us-east-1")  # default retry behaviour
     tries = _count_http_tries(client, 500, "InternalError")
 
-    with pytest.raises(Exception):  # noqa: B017, PT011 - any botocore error will do
+    with pytest.raises(Exception):  # noqa: B017 - any botocore error will do
         client.publish(TopicArn=ARN, Subject=SUBJECT, Message=BODY)
 
     assert len(tries) > 1
@@ -256,7 +262,7 @@ def test_aws_errors_map_to_a_reason_and_a_retry_decision(
             "no_credentials",
             False,
         ),
-        (ProfileNotFound(profile="nope"), "no_credentials", False),
+        (ProfileNotFound(profile="nope"), "bad_aws_config", False),
     ],
 )
 def test_connection_and_credential_errors_map_to_a_reason_and_a_retry_decision(
@@ -331,3 +337,94 @@ def test_aws_error_text_and_identifiers_never_reach_errors_or_logs(
     assert "123456789012" not in shown and "not authorized" not in shown
     assert BODY not in shown
     assert exc.value.__cause__ is None and exc.value.__suppress_context__ is True
+
+
+# --- problems with the user's own AWS setup, found while building the client ---
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (ProfileNotFound(profile="nope"), "bad_aws_config"),
+        (ConfigParseError(path="/x/config"), "bad_aws_config"),
+        (InvalidConfigError(error_msg="bad value"), "bad_aws_config"),
+        (InvalidRegionError(region_name="x y"), "bad_aws_config"),
+        (NoRegionError(), "bad_aws_config"),
+        (SSOTokenLoadError(error_msg="expired"), "no_credentials"),
+        (UnauthorizedSSOTokenError(), "no_credentials"),
+    ],
+)
+def test_setup_problems_raised_while_building_the_client_are_config_problems(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, reason: str
+) -> None:
+    def failing_new_client(region: str) -> Any:
+        raise error
+
+    monkeypatch.setattr(sns_sender, "_new_client", failing_new_client)
+
+    with pytest.raises(SendError) as exc:
+        sns_email_sender()(ARN, SUBJECT, BODY)
+
+    assert exc.value.reason == reason and exc.value.retryable is False
+
+
+def _real_client_with_tripwire(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
+    """Use the REAL client factory, with a tripwire so nothing can reach a network."""
+    attempted: list[bool] = []
+
+    def real_new_client(region: str) -> Any:
+        client = REAL_NEW_CLIENT(region)
+
+        def tripwire(**kwargs: Any) -> None:
+            attempted.append(True)
+            raise AssertionError("a request left the machine")
+
+        client.meta.events.register("before-send.sns.Publish", tripwire)
+        return client
+
+    monkeypatch.setattr(sns_sender, "_new_client", real_new_client)
+    return attempted
+
+
+@pytest.mark.parametrize("profile", ["definitely-not-a-profile", "default"])
+def test_an_unknown_aws_profile_is_a_config_problem_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch, profile: str
+) -> None:
+    # "default" matters: with only environment keys and no config files there is no
+    # such profile, and botocore refuses it when the client is built.
+    attempted = _real_client_with_tripwire(monkeypatch)
+    monkeypatch.setenv("AWS_PROFILE", profile)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "example-secret-key")
+
+    with pytest.raises(SendError) as exc:
+        sns_email_sender()(ARN, SUBJECT, BODY)
+
+    assert exc.value.reason == "bad_aws_config" and attempted == []
+
+
+def test_environment_keys_alone_work_without_any_profile(
+    monkeypatch: pytest.MonkeyPatch, aws_dummy_credentials: None
+) -> None:
+    client = REAL_NEW_CLIENT("us-east-1")
+    monkeypatch.setattr(sns_sender, "_new_client", lambda region: client)
+    stubber = Stubber(client)
+    stubber.add_response("publish", {"MessageId": "m-1"})
+    stubber.activate()
+
+    assert sns_email_sender()(ARN, SUBJECT, BODY) == "m-1"
+
+
+def test_a_malformed_aws_config_file_is_a_config_problem(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    attempted = _real_client_with_tripwire(monkeypatch)
+    broken = tmp_path / "config"
+    broken.write_text("[default\nregion = us-east-1\n")
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(broken))
+    monkeypatch.setenv("AWS_PROFILE", "default")
+
+    with pytest.raises(SendError) as exc:
+        sns_email_sender()(ARN, SUBJECT, BODY)
+
+    assert exc.value.reason == "bad_aws_config" and attempted == []

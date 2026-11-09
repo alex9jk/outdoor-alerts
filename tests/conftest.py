@@ -1,4 +1,5 @@
-from collections.abc import Callable
+import logging
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import boto3
@@ -63,12 +64,38 @@ def no_real_send(
         "AWS_DEFAULT_REGION",
         "AWS_ENDPOINT_URL",
         "AWS_ENDPOINT_URL_SNS",
+        # Other ways botocore finds credentials (each can mean a network call) ...
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_ROLE_ARN",
+        "AWS_ROLE_SESSION_NAME",
+        # ... and settings that change retry or network behaviour.
+        "AWS_RETRY_MODE",
+        "AWS_MAX_ATTEMPTS",
+        "AWS_DEFAULTS_MODE",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "https_proxy",
+        "http_proxy",
     ):
         monkeypatch.delenv(name, raising=False)
     nowhere = tmp_path_factory.mktemp("no-aws")
     monkeypatch.setenv("AWS_CONFIG_FILE", str(nowhere / "config"))
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(nowhere / "credentials"))
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+
+
+@pytest.fixture(autouse=True)
+def restore_logger_levels() -> Iterator[None]:
+    """`main()` holds noisy libraries at WARNING; put them back after each test."""
+    names = ("httpx", "httpcore", "botocore", "boto3", "urllib3")
+    before = {name: logging.getLogger(name).level for name in names}
+    yield
+    for name, level in before.items():
+        logging.getLogger(name).setLevel(level)
 
 
 @pytest.fixture

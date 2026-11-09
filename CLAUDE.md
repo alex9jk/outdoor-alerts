@@ -47,7 +47,7 @@ src/gooddays/
     service.py     # fetch_conditions(): orchestrates per spot
     raw.py         # --save-raw snapshots and --fixtures replay fetchers
   report.py        # text and JSON rendering of fetch and score results
-  cli.py           # `python -m gooddays fetch`, `score` and `message`
+  cli.py           # `python -m gooddays fetch`, `score`, `message` and `send`
 tests/
   fixtures/        # saved raw API responses (JSON)
 spots.yaml
@@ -172,7 +172,13 @@ short digest as before (the SMS-sized text, now carried by an email with a fixed
   also retries read timeouts, and a publish has no idempotency key, so it could email twice).
   `send_notification` makes at most 2 attempts in total, only for connection failures,
   connect timeouts and 5xx; never for read timeouts or any 4xx. Timeouts are 10s connect and
-  10s read. Exit 4 after a read timeout means "unknown", and the output says so.
+  10s read. Exit 4 after a read timeout means "unknown", and the output says so. A 5xx does
+  not prove SNS rejected the publish, so retrying after one can, rarely, email twice; that
+  is an accepted trade-off.
+- **Setup problems** found before any request (no credentials, an `AWS_PROFILE` that does
+  not exist, a broken AWS config file) are config errors: exit 2, naming what to check, and
+  "nothing was sent". Use EITHER `AWS_PROFILE` (a profile that exists) OR environment keys;
+  `AWS_PROFILE=default` with only environment keys makes botocore refuse to start.
 - **Failure**: exit 4, the text is still printed, and a short reason key (`unavailable`,
   `read_timeout`, `auth_rejected`, `topic_not_found`, `throttled`, `rejected`, ...). AWS error
   text is never kept; only the error code and HTTP status are used.

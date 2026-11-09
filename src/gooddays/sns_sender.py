@@ -16,15 +16,22 @@ from botocore.config import Config
 from botocore.exceptions import (
     BotoCoreError,
     ClientError,
+    ConfigNotFound,
+    ConfigParseError,
     ConnectionClosedError,
     ConnectTimeoutError,
     CredentialRetrievalError,
     EndpointConnectionError,
+    InvalidConfigError,
+    InvalidRegionError,
     NoCredentialsError,
+    NoRegionError,
     PartialCredentialsError,
     ProfileNotFound,
     ReadTimeoutError,
+    SSOTokenLoadError,
     TokenRetrievalError,
+    UnauthorizedSSOTokenError,
 )
 
 from gooddays.notify import NotificationSender, SendError, topic_region
@@ -37,6 +44,25 @@ _CONFIG = Config(
     connect_timeout=TIMEOUT_SECONDS,
     read_timeout=TIMEOUT_SECONDS,
     retries={"total_max_attempts": 1},
+)
+
+# Problems with the user's AWS setup, found before any request is made. Building the
+# client reads AWS_PROFILE and the config files, so these can be raised there too.
+_NO_CREDENTIALS = (
+    NoCredentialsError,
+    PartialCredentialsError,
+    CredentialRetrievalError,
+    TokenRetrievalError,
+    SSOTokenLoadError,
+    UnauthorizedSSOTokenError,
+)
+_BAD_AWS_CONFIG = (
+    ProfileNotFound,
+    ConfigParseError,
+    ConfigNotFound,
+    InvalidConfigError,
+    InvalidRegionError,
+    NoRegionError,
 )
 
 _AUTH_CODES = frozenset(
@@ -68,20 +94,18 @@ def sns_email_sender() -> NotificationSender:
 
     def send(topic_arn: str, subject: str, body: str) -> str:
         region = topic_region(topic_arn)
-        if region not in clients:
-            clients[region] = _new_client(region)
         try:
+            # The client is built inside the try: that is where an unknown
+            # AWS_PROFILE or a malformed AWS config file is first noticed.
+            if region not in clients:
+                clients[region] = _new_client(region)
             response = clients[region].publish(
                 TopicArn=topic_arn, Subject=subject, Message=body
             )
-        except (
-            NoCredentialsError,
-            PartialCredentialsError,
-            CredentialRetrievalError,
-            ProfileNotFound,
-            TokenRetrievalError,
-        ):
+        except _NO_CREDENTIALS:
             raise SendError("no_credentials") from None
+        except _BAD_AWS_CONFIG:
+            raise SendError("bad_aws_config") from None
         except ConnectTimeoutError:
             raise SendError("connect_timeout", retryable=True) from None
         except EndpointConnectionError:

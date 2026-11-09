@@ -1486,3 +1486,39 @@ def test_even_at_debug_the_real_adapter_never_logs_the_message(
     assert "botocore" not in {record.name.split(".")[0] for record in caplog.records}
     assert "Spot 0 hiking" not in caplog.text and SEND_BODY not in caplog.text
     assert "example-secret-key" not in caplog.text
+
+
+def test_send_with_unusable_aws_settings_exits_2_with_a_clear_message(
+    project: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = write_warm_dry_run(project / "saved")
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    use_sender(monkeypatch, FakeSender(SendError("bad_aws_config")))
+
+    assert main(send_args(folder)) == 2
+
+    out, err = capsys.readouterr()
+    assert "your AWS settings are not usable" in err and "AWS_PROFILE" in err
+    assert "nothing was sent" in err and "sent to" not in out
+
+
+def test_send_with_an_unknown_aws_profile_is_a_config_error_not_a_crash(
+    project: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    real_aws_client: Any,
+) -> None:
+    # The README used to suggest AWS_PROFILE=default with environment keys; with no
+    # such profile on disk botocore refuses it while building the client.
+    folder = write_warm_dry_run(project / "saved")
+    real_aws_client()  # the real adapter and boto3 client (building fails before any request)
+    monkeypatch.setenv(TOPIC_ENV, ARN)
+    monkeypatch.setenv("AWS_PROFILE", "default")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "example-secret-key")
+
+    assert main(send_args(folder)) == 2
+
+    out, err = capsys.readouterr()
+    assert "your AWS settings are not usable" in err and "nothing was sent" in err
+    assert "Traceback" not in err and "example-secret-key" not in out + err

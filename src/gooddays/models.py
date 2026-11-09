@@ -196,7 +196,7 @@ class Message:
 class SendResult:
     """What happened when we tried to send. Nothing is stored."""
 
-    accepted: bool  # the provider accepted it (not "delivered to the phone")
+    accepted: bool  # the provider accepted it (not that it was delivered or read)
     message_id: str | None
-    attempts: int  # requests actually made
+    attempts: int  # tries made (a try that failed before any request left counts)
     reason: str | None  # a short key when nothing was accepted

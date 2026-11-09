@@ -17,8 +17,8 @@ from gooddays.storage import ConfigError
 logger = logging.getLogger(__name__)
 
 TOPIC_ENV = "GOODDAYS_SNS_TOPIC_ARN"
-# SNS emails need a subject. Plain ASCII, starts with a letter, under 100 characters
-# (SNS's own rules for email subjects).
+# SNS emails need a subject. Kept plain on purpose: ASCII, one line, short, starting
+# with a letter (SNS limits email subjects to about 100 characters; verify the details).
 SUBJECT = "Good days to get outside"
 MAX_ATTEMPTS = 2  # in total, including the first
 BACKOFF_SECONDS = 1.0
@@ -26,10 +26,12 @@ BACKOFF_SECONDS = 1.0
 # Indirection so tests can skip the real wait.
 _sleep = time.sleep
 
-# arn:aws:sns:<region>:<12-digit account>:<topic name>. The partition may be aws,
-# aws-cn or aws-us-gov.
+# arn:<partition>:sns:<region>:<12-digit account>:<topic name>. A region looks like
+# us-east-1 or cn-north-1. A FIFO topic's name ends in ".fifo", which this rejects on
+# purpose: SNS email subscriptions need a standard topic.
 _TOPIC_ARN = re.compile(
-    r"arn:aws[a-z-]*:sns:([a-z0-9-]+):(\d{12}):[A-Za-z0-9_-]{1,256}"
+    r"arn:(?:aws|aws-cn|aws-us-gov|aws-iso(?:-[a-z])?):sns:"
+    r"([a-z]{2}(?:-[a-z]+)+-\d{1,2}):(\d{12}):[A-Za-z0-9_-]{1,256}"
 )
 
 # (destination, subject, body) -> the provider's message id. Raises SendError.
@@ -48,7 +50,7 @@ class SendError(Exception):
         super().__init__(reason)
         self.reason = reason
         self.retryable = retryable
-        self.attempts = 0  # filled in by send_notification
+        self.attempts = 0  # tries made, set by send_notification
 
 
 def parse_topic_arn(raw: str | None) -> str:
@@ -62,7 +64,8 @@ def parse_topic_arn(raw: str | None) -> str:
     if not _TOPIC_ARN.fullmatch(arn):  # fullmatch: "$" would accept a trailing newline
         raise ConfigError(
             f"{TOPIC_ENV} is not a valid SNS topic ARN "
-            "(expected like arn:aws:sns:us-east-1:123456789012:good-days)"
+            "(expected like arn:aws:sns:us-east-1:123456789012:good-days, "
+            "a standard topic, not a FIFO topic)"
         )
     return arn
 
@@ -76,12 +79,12 @@ def topic_region(arn: str) -> str:
 
 
 def mask_topic(arn: str) -> str:
-    """Hide all but the last four digits of the AWS account id in a topic ARN."""
+    """Hide all but the last four digits of the AWS account id, wherever it appears."""
     match = _TOPIC_ARN.fullmatch(arn)
     if match is None:
         return "***"
     account = match.group(2)
-    return arn.replace(f":{account}:", f":********{account[-4:]}:")
+    return arn.replace(account, f"********{account[-4:]}")
 
 
 def send_notification(

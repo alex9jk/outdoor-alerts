@@ -67,7 +67,13 @@ Then set these in your shell (never commit them):
 
 ```sh
 export GOODDAYS_SNS_TOPIC_ARN="arn:aws:sns:us-east-1:123456789012:good-days"
-export AWS_PROFILE="default"     # or AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+
+# Credentials: EITHER a profile that exists in ~/.aws ...
+export AWS_PROFILE="my-profile"
+# ... OR environment keys (and then do not set AWS_PROFILE: a profile name that does not
+# exist, even "default", makes the AWS library refuse to start).
+export AWS_ACCESS_KEY_ID="..."
+export AWS_SECRET_ACCESS_KEY="..."
 ```
 
 The region is taken from the topic ARN. "Sent" means SNS accepted the message, not that an

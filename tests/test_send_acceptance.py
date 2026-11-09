@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
-import boto3
 import pytest
 from botocore.awsrequest import AWSResponse
 from botocore.exceptions import (
@@ -655,7 +654,7 @@ def test_ac13_other_commands_do_not_import_boto3_or_the_sender(
 # --- AC14: tests cannot publish or touch the network ---
 
 
-def test_ac14_forgetting_to_fake_the_sender_ends_in_exit_70_and_no_client(
+def test_ac14_forgetting_to_fake_the_sender_ends_in_exit_70(
     good_run: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
@@ -663,15 +662,12 @@ def test_ac14_forgetting_to_fake_the_sender_ends_in_exit_70_and_no_client(
     fake_credentials: None,
 ) -> None:
     monkeypatch.setenv(TOPIC_ENV, ARN)
-    clients: list[Any] = []
-    monkeypatch.setattr(boto3, "client", lambda *a, **k: clients.append(a))
 
     with caplog.at_level(logging.ERROR):
-        assert main(send_args(good_run)) == 70
+        assert main(send_args(good_run)) == 70  # the autouse guard stopped it
 
     assert "fake the sender" in caplog.text
     assert "unexpected failure" in capsys.readouterr().err
-    assert clients == []  # no AWS client was created
 
 
 # --- AC15: the CI guard ---

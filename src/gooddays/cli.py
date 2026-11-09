@@ -244,7 +244,7 @@ def _score(
         if args.json
         else score_to_text(scores, result.errors)
     )
-    return EXIT_ALL_SPOTS_FAILED if result.errors and not result.results else EXIT_OK
+    return EXIT_ALL_SPOTS_FAILED if _all_spots_failed(result) else EXIT_OK
 
 
 def anthropic_writer() -> MessageWriter:
@@ -286,6 +286,20 @@ def _message(
     result, message = _message_run(args, settings, spots, storage)
     _emit(message.body if message is not None else "nothing to send")
     return EXIT_ALL_SPOTS_FAILED if _all_spots_failed(result) else EXIT_OK
+
+
+# Reasons the AWS side reports for a problem with the user's own setup (found before
+# any request is made), and what to tell them.
+_AWS_SETUP_PROBLEMS = {
+    "no_credentials": (
+        "no AWS credentials found (set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, "
+        "or AWS_PROFILE to a profile that exists)"
+    ),
+    "bad_aws_config": (
+        "your AWS settings are not usable (check that AWS_PROFILE names a profile "
+        "that exists, and your AWS config files)"
+    ),
+}
 
 
 def sns_sender() -> NotificationSender:
@@ -330,10 +344,9 @@ def _send(
     try:
         sent = send_notification(message, topic, sns_sender())
     except SendError as error:
-        if error.reason == "no_credentials":
+        if error.reason in _AWS_SETUP_PROBLEMS:
             print(
-                "config error: no AWS credentials found (set AWS_ACCESS_KEY_ID and "
-                "AWS_SECRET_ACCESS_KEY, or AWS_PROFILE); nothing was sent",
+                f"config error: {_AWS_SETUP_PROBLEMS[error.reason]}; nothing was sent",
                 file=sys.stderr,
             )
             return EXIT_USAGE_OR_CONFIG
@@ -392,7 +405,7 @@ def _fetch(args: argparse.Namespace, settings: Settings, spots: list[Spot]) -> i
         if snapshot is not None:
             snapshot.discard()  # a no-op once committed
 
-    if result.errors and not result.results:
+    if _all_spots_failed(result):
         return EXIT_ALL_SPOTS_FAILED
     return EXIT_OK if saved else EXIT_SAVE_FAILED
 
