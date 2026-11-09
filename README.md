@@ -17,10 +17,11 @@ fetch_conditions → score_conditions → generate_message → send_notification
 | `fetch_conditions` | done | Calls Open-Meteo (2-day hourly forecast, sunrise/sunset) and the NWS API (active alerts) for each spot, and normalizes them into one `SpotConditions` per spot. |
 | `score_conditions` | done | Applies the thresholds in `spots.yaml` and says pass/fail per spot, activity and day. |
 | `generate_message` | done | Writes one short SMS digest of the good days. Claude writes the text; if it fails or its text fails checks, a plain text built by code is used instead. |
-| `send_notification` | not started | Will deliver the message. |
+| `send_notification` | done | Emails the message through an AWS SNS topic (`send`). Nothing is sent unless you run `send` without `--dry-run`. |
 
-Everything runs locally as a plain Python package. AWS (Lambda, Step Functions,
-DynamoDB) is planned for later, so the code has no AWS dependencies yet.
+Everything runs locally as a plain Python package. The only AWS code is the SNS
+publisher used by `send` (`boto3`); Lambda, Step Functions and DynamoDB are planned for
+later.
 
 Fetching is resilient: spots are fetched concurrently (max 5 at a time), requests time
 out after 10s, timeouts and 5xx responses are retried up to 3 times with exponential
@@ -52,8 +53,25 @@ than committing it:
 export GOODDAYS_NWS_USER_AGENT="gooddays (you@example.com)"
 ```
 
-The `message` command uses Claude and needs `ANTHROPIC_API_KEY`. Use `--no-ai` to skip
-it.
+The `message` and `send` commands use Claude and need `ANTHROPIC_API_KEY`. Use `--no-ai`
+to skip it.
+
+To send the email, `send` publishes to an AWS SNS topic. Set up once, outside the code:
+
+1. Create a (standard) SNS topic, e.g. `good-days`.
+2. Subscribe your email address to it and click the confirmation link AWS emails you.
+   SNS emails only *confirmed* subscribers and still reports success otherwise.
+3. Give your AWS user or role `sns:Publish` on the topic.
+
+Then set these in your shell (never commit them):
+
+```sh
+export GOODDAYS_SNS_TOPIC_ARN="arn:aws:sns:us-east-1:123456789012:good-days"
+export AWS_PROFILE="default"     # or AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+```
+
+The region is taken from the topic ARN. "Sent" means SNS accepted the message, not that an
+email arrived. The email comes from AWS, as plain text with an unsubscribe footer.
 
 ## Usage
 
@@ -61,12 +79,16 @@ it.
 uv run python -m gooddays fetch   [--save-raw | --fixtures DIR] [--raw-root DIR] [--json] [--spots FILE]
 uv run python -m gooddays score   [--fixtures DIR] [--json] [--spots FILE]
 uv run python -m gooddays message [--fixtures DIR] [--no-ai] [--spots FILE]
+uv run python -m gooddays send    [--fixtures DIR] [--no-ai] [--dry-run] [--spots FILE]
 ```
 
 - `fetch` prints the normalized conditions for every spot.
 - `score` fetches, then prints pass/fail per spot, activity and day (today and tomorrow).
 - `message` fetches, scores and prints one SMS digest of the good days, or
   "nothing to send".
+- `send` does what `message` does, then emails the result through SNS. It is a real
+  publish unless you pass `--dry-run`; it refuses to send when the `CI` environment
+  variable is set. Nothing is stored, so running it again sends the same email again.
 - `--save-raw` (fetch only) also writes raw API responses to
   `data/raw/<date>/<spot_id>/` (git-ignored).
 - `--fixtures DIR` replays a folder written by `--save-raw` instead of calling the APIs,
@@ -81,6 +103,7 @@ uv run python -m gooddays message [--fixtures DIR] [--no-ai] [--spots FILE]
 | 1 | Every spot failed |
 | 2 | Bad usage or config |
 | 3 | `--save-raw` could not save everything |
+| 4 | `send` could not get SNS to accept the text (the text is still printed) |
 | 70 | Unexpected error |
 | 130 | Interrupted (Ctrl-C) |
 | 141 | stdout closed early (e.g. `| head`) |
@@ -100,6 +123,8 @@ src/gooddays/
   score.py         # score_conditions()
   message.py       # generate_message(): checks and code-built fallback text
   ai_writer.py     # Claude-backed message writer (only module using the Anthropic SDK)
+  notify.py        # send_notification(): topic checks and the narrow retry
+  sns_sender.py    # the AWS SNS publisher (the only boto3 user)
   report.py        # text and JSON output
   cli.py           # python -m gooddays ...
 tests/

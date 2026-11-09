@@ -7,11 +7,14 @@ outdoor spots (hiking, biking, downhill and cross-country skiing) and alerts me 
 The pipeline has four stages:
 `fetch_conditions` → `score_conditions` → `generate_message` → `send_notification`
 
-**`fetch_conditions` and `score_conditions` are built. Current focus:
-`generate_message`.** Do not build `send_notification` yet.
+**All four stages are built** (`fetch_conditions`, `score_conditions`, `generate_message`,
+`send_notification`). Running it on AWS (Lambda, Step Functions) is a later step the user
+will decide on.
 
-Everything runs locally as a plain Python package first. AWS (Lambda, Step Functions,
-DynamoDB) comes later, so keep the code free of AWS dependencies for now.
+Everything runs locally as a plain Python package first. AWS is allowed only in
+`sns_sender.py` (`boto3`, imported lazily, so fetch, score and message never load it).
+Lambda, Step Functions and DynamoDB come later, so keep everything else free of AWS
+dependencies for now.
 
 ## Tech and conventions
 - Python 3.12, managed with `uv`
@@ -19,6 +22,8 @@ DynamoDB) comes later, so keep the code free of AWS dependencies for now.
 - Claude API: the official `anthropic` SDK, used only in `ai_writer.py`, with the
   `ANTHROPIC_API_KEY` environment variable (never committed or logged). It brings its own
   HTTP library (`httpx2`), so `respx` cannot mock it: tests use a fake `MessageWriter`.
+- AWS: `boto3`, only in `sns_sender.py`, to publish to an SNS topic. It ships no type
+  information, so `mypy` ignores missing imports for `boto3` and `botocore`.
 - Data models: `dataclasses` or `pydantic`, fully type-hinted
 - Lint/format: `ruff`; type check: `mypy --strict` on `src/`
 - Tests: `pytest`, with mocked HTTP (`respx`) — tests never hit the network
@@ -29,10 +34,12 @@ DynamoDB) comes later, so keep the code free of AWS dependencies for now.
 ```
 src/gooddays/
   models.py        # Spot, HourlyConditions, Alert, SpotConditions, Thresholds, ScoreResult,
-                   # GoodEntry, MessageFacts, Message
+                   # GoodEntry, MessageFacts, Message, SendResult
   storage.py       # Storage protocol + LocalStorage (reads spots.yaml)
   score.py         # score_conditions(): pass/fail per spot, activity and day
   message.py       # generate_message(): one SMS digest of the good days (pure parts)
+  notify.py        # send_notification(): topic checks, subject, narrow retry (pure parts)
+  sns_sender.py    # the AWS SNS publisher (the only boto3 user)
   ai_writer.py     # the Claude writer behind generate_message (the only SDK user)
   fetch/
     open_meteo.py  # forecast client
@@ -102,7 +109,7 @@ only printed; nothing is stored or sent.
 ## What generate_message does
 Turns the good days into ONE short SMS text (plain ASCII, body only, no subject), or into
 nothing when there is nothing worth sending. Only printed for now; `send_notification`
-(recipients, channel, sending) is a later stage.
+(publishing it) is the next stage and is built.
 
 - **Code decides what is mentioned**: only `good` entries for today and tomorrow, ordered by
   day, then spots in config order, then each spot's own activity order. Never the AI. Spots
@@ -137,15 +144,57 @@ nothing when there is nothing worth sending. Only printed for now; `send_notific
 - Moving to Amazon Bedrock later means changing `build_client`, `MODEL` and the fallback
   setting in `ai_writer.py` (the SDK has a Bedrock client); nothing else.
 
+## What send_notification does
+`python -m gooddays send` runs the whole pipeline and emails the result through AWS SNS. It
+is the only command that sends anything; `message` stays print-only. The text is the same
+short digest as before (the SMS-sized text, now carried by an email with a fixed subject).
+
+- **Channel**: it publishes to ONE SNS topic. The email address is a *subscription* on that
+  topic, created and confirmed outside the code: SNS emails only subscribers who clicked the
+  confirmation link AWS emailed them, and it still accepts the publish for everyone else, so
+  an unconfirmed subscription means silence. The email comes from AWS (plain text, with an
+  unsubscribe footer). SNS cannot email an arbitrary address directly; Amazon SES can, and is
+  the alternative if that ever matters.
+- **Boundary**: a replaceable `NotificationSender` (`(destination, subject, body) -> message
+  id`, raising `SendError(reason, retryable)`). `sns_sender.py` is the SNS version; the
+  earlier Twilio SMS sender lives on the unmerged `feature/send-sms` branch.
+- **Settings**: `GOODDAYS_SNS_TOPIC_ARN` (like `arn:aws:sns:us-east-1:123456789012:good-days`;
+  the region is read from it) and AWS credentials the usual way (`AWS_ACCESS_KEY_ID` and
+  `AWS_SECRET_ACCESS_KEY`, or `AWS_PROFILE`, or an IAM role). Needs `sns:Publish` on the
+  topic. Environment variables only; never in `spots.yaml`, never logged in full (the AWS
+  account id in the ARN is masked as `********9012`, and the body is not logged).
+- **Safe by default**: nothing to send means no topic or credentials are read and nothing is
+  published. `--dry-run` prints the text instead (allowed in CI). A real send is refused when
+  `CI` is set to anything. A missing or invalid topic, or no AWS credentials, is a config
+  error (exit 2) that names the setting, never its value.
+- **Sent means accepted**: SNS returned a message id, not that an email arrived or was read.
+- **Retries**: botocore's own retries are turned off (`total_max_attempts: 1`; by default it
+  also retries read timeouts, and a publish has no idempotency key, so it could email twice).
+  `send_notification` makes at most 2 attempts in total, only for connection failures,
+  connect timeouts and 5xx; never for read timeouts or any 4xx. Timeouts are 10s connect and
+  10s read. Exit 4 after a read timeout means "unknown", and the output says so.
+- **Failure**: exit 4, the text is still printed, and a short reason key (`unavailable`,
+  `read_timeout`, `auth_rejected`, `topic_not_found`, `throttled`, `rejected`, ...). AWS error
+  text is never kept; only the error code and HTTP status are used.
+- **Repeats**: nothing is stored, so running it again emails the same text again; a warning
+  says so. Dedup is deferred (a later design should key on day, spot and activity, not on the
+  text, because Claude's wording changes).
+- **Tests** can never publish: an autouse fixture makes the real client impossible, clears
+  `CI`, the topic and the AWS settings, points AWS config files away and resets boto3's
+  default session (it caches credentials across clients). Tests fake the sender, and the SNS
+  adapter is tested with botocore's `Stubber` and a `before-send` hook that counts HTTP tries.
+
 ## Rules
 - **No scoring or judgment in the fetch stage.** This stage only fetches and normalizes.
   "Is it good?" belongs in `score_conditions`.
 - **One bad spot never fails the run.** Catch per-spot errors, record them in
   `errors`, and keep going.
 - Retries: up to 3 attempts with exponential backoff on timeouts and 5xx only.
-  Never retry 4xx. (The Claude SDK call in `ai_writer.py` is the one exception: it uses
-  the SDK's own retries, which also cover 408, 409 and 429.)
-- Timeouts: 10s per request. (Except the Claude call, which gets 30s because Opus thinks first.)
+  Never retry 4xx. (Two exceptions: the Claude SDK call in `ai_writer.py` uses the SDK's own retries,
+  which also cover 408, 409 and 429; and the SNS publish retries only connection failures
+  and 5xx, at most twice in total, with botocore's own retries off.)
+- Timeouts: 10s per request. (Except the Claude call, which gets 30s because Opus thinks first, and the SNS publish,
+  which gets 10s connect and 10s read, see "What send_notification does".)
 - Fetch spots concurrently (async `httpx`), but cap concurrency at 5.
 - Keep API clients thin: they return parsed raw responses. Normalization
   happens in `service.py`, so it can be tested from fixtures alone.
@@ -175,6 +224,10 @@ nothing when there is nothing worth sending. Only printed for now; `send_notific
   (fetches, scores, then prints one SMS text or `nothing to send`; needs `ANTHROPIC_API_KEY`
   unless `--no-ai`, and falls back to the code-built text if Claude can't be used; exit codes
   as for score).
+- Send: `uv run python -m gooddays send [--spots PATH] [--fixtures DIR] [--no-ai] [--dry-run]`
+  (a REAL email through SNS unless `--dry-run`; needs `GOODDAYS_SNS_TOPIC_ARN` and AWS
+  credentials. Exit codes as for score, plus 4 when the text could not be sent; the text is
+  still printed).
 - Test: `uv run pytest`
 - Lint/types: `uv run ruff check . && uv run mypy src`
 
