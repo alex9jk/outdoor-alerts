@@ -56,6 +56,10 @@ class SentStore(Protocol):
         """Every recorded key. Raises ConfigError when the record is unusable."""
         ...
 
+    def check_writable(self, *, create: bool = True) -> None:
+        """Raise ConfigError if `record` could not work, before anything is sent."""
+        ...
+
     def record(
         self,
         keys: Sequence[EntryKey],
