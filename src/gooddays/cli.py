@@ -28,6 +28,7 @@ from gooddays.models import (
     Spot,
 )
 from gooddays.notify import (
+    AWS_SETUP_PROBLEMS,
     SUBJECT,
     TOPIC_ENV,
     NotificationSender,
@@ -335,20 +336,6 @@ def _message(
     return EXIT_ALL_SPOTS_FAILED if _all_spots_failed(result) else EXIT_OK
 
 
-# Reasons the AWS side reports for a problem with the user's own setup (found before
-# any request is made), and what to tell them.
-_AWS_SETUP_PROBLEMS = {
-    "no_credentials": (
-        "no AWS credentials found (set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, "
-        "or AWS_PROFILE to a profile that exists)"
-    ),
-    "bad_aws_config": (
-        "your AWS settings are not usable (check that AWS_PROFILE names a profile "
-        "that exists, and your AWS config files)"
-    ),
-}
-
-
 def sns_sender() -> NotificationSender:
     """The SNS sender. Imported here so only `send` loads boto3."""
     from gooddays.sns_sender import sns_email_sender
@@ -420,9 +407,9 @@ def _send_locked(
     try:
         sent = send_notification(message, topic, sns_sender())
     except SendError as error:
-        if error.reason in _AWS_SETUP_PROBLEMS:
+        if error.reason in AWS_SETUP_PROBLEMS:
             print(
-                f"config error: {_AWS_SETUP_PROBLEMS[error.reason]}; nothing was sent",
+                f"config error: {AWS_SETUP_PROBLEMS[error.reason]}; nothing was sent",
                 file=sys.stderr,
             )
             return EXIT_USAGE_OR_CONFIG

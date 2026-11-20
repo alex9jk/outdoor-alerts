@@ -39,20 +39,20 @@ def validate_key(key: str) -> None:
         not key
         or key.startswith("/")
         or "\\" in key
-        or any(c < " " for c in key)
+        or not key.isprintable()
         or any(part in ("", ".", "..") for part in key.split("/"))
     ):
         raise ObjectStoreError(f"invalid object key: {key!r}")
 
 
-def _dumps(key: str, data: Any) -> str:
+def encode_json(key: str, data: Any) -> str:
     try:
         return json.dumps(data, allow_nan=False, indent=2) + "\n"
     except (TypeError, ValueError) as e:
         raise ObjectStoreError(f"{key} is not JSON-serializable: {e}") from e
 
 
-def _loads(key: str, text: str) -> Any:
+def decode_json(key: str, text: str) -> Any:
     try:
         return json.loads(text)
     except ValueError as e:
@@ -67,7 +67,7 @@ class InMemoryObjectStore:
 
     def put_json(self, key: str, data: Any) -> None:
         validate_key(key)
-        self._objects[key] = _dumps(key, data)
+        self._objects[key] = encode_json(key, data)
 
     def get_json(self, key: str) -> Any:
         validate_key(key)
@@ -75,7 +75,7 @@ class InMemoryObjectStore:
             text = self._objects[key]
         except KeyError:
             raise ObjectNotFoundError(key) from None
-        return _loads(key, text)
+        return decode_json(key, text)
 
     def keys(self) -> list[str]:
         return sorted(self._objects)
@@ -96,7 +96,7 @@ class LocalDirectoryObjectStore:
 
     def put_json(self, key: str, data: Any) -> None:
         path = self._path(key)
-        text = _dumps(key, data)
+        text = encode_json(key, data)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             fd, temp_name = tempfile.mkstemp(
@@ -123,4 +123,4 @@ class LocalDirectoryObjectStore:
             raise ObjectNotFoundError(key) from None
         except (OSError, UnicodeDecodeError) as e:
             raise ObjectStoreError(f"cannot read {key}") from e
-        return _loads(key, text)
+        return decode_json(key, text)

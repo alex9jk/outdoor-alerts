@@ -8,13 +8,15 @@ The pipeline has four stages:
 `fetch_conditions` → `score_conditions` → `generate_message` → `send_notification`
 
 **All four stages are built** (`fetch_conditions`, `score_conditions`, `generate_message`,
-`send_notification`). Running it on AWS (Lambda, Step Functions) is a later step the user
-will decide on.
+`send_notification`). Moving to AWS is under way in phases: the user chose Step Functions
+with one Lambda per stage, Terraform (local state first), DynamoDB for the sent record, and
+the Anthropic API for now (account 534025478232, us-east-1, the real SNS topic). Phase 1
+(the stage handlers, below) is local-only; Terraform, DynamoDB and the schedule come later.
 
 Everything runs locally as a plain Python package first. AWS is allowed only in
-`sns_sender.py` (`boto3`, imported lazily, so fetch, score and message never load it).
-Lambda, Step Functions and DynamoDB come later, so keep everything else free of AWS
-dependencies for now.
+`sns_sender.py` and `s3_store.py` (`boto3`, imported lazily, so fetch, score, message and
+`handlers.py` never load it). Lambda, Step Functions and DynamoDB come later, so keep
+everything else free of AWS dependencies for now.
 
 ## Tech and conventions
 - Python 3.12, managed with `uv`
@@ -22,7 +24,8 @@ dependencies for now.
 - Claude API: the official `anthropic` SDK, used only in `ai_writer.py`, with the
   `ANTHROPIC_API_KEY` environment variable (never committed or logged). It brings its own
   HTTP library (`httpx2`), so `respx` cannot mock it: tests use a fake `MessageWriter`.
-- AWS: `boto3`, only in `sns_sender.py`, to publish to an SNS topic. It ships no type
+- AWS: `boto3`, only in `sns_sender.py` (publish to an SNS topic) and `s3_store.py`
+  (the run files between stages). It ships no type
   information, so `mypy` ignores missing imports for `boto3` and `botocore`.
 - Data models: `dataclasses` or `pydantic`, fully type-hinted
 - Lint/format: `ruff`; type check: `mypy --strict` on `src/`
@@ -40,6 +43,10 @@ src/gooddays/
   message.py       # generate_message(): one SMS digest of the good days (pure parts)
   notify.py        # send_notification(): topic checks, subject, narrow retry (pure parts)
   sns_sender.py    # the AWS SNS publisher (the only boto3 user)
+  objectstore.py   # ObjectStore protocol + in-memory and local-directory stores (no boto3)
+  s3_store.py      # the S3 ObjectStore (the second boto3 user; imported lazily)
+  serialize.py     # strict versioned JSON for what the stages hand on
+  handlers.py      # fetch/score/message/send Lambda handlers (one per stage)
   sent.py          # SentStore protocol + LocalSentStore (JSON record of emailed days)
   ai_writer.py     # the Claude writer behind generate_message (the only SDK user)
   fetch/
@@ -215,6 +222,53 @@ short digest as before (the SMS-sized text, now carried by an email with a fixed
   `CI`, the topic and the AWS settings, points AWS config files away and resets boto3's
   default session (it caches credentials across clients). Tests fake the sender, and the SNS
   adapter is tested with botocore's `Stubber` and a `before-send` hook that counts HTTP tries.
+
+## What the stage handlers do (phase 1 of the AWS move)
+`handlers.py` runs the pipeline as four separate stages for Step Functions:
+`fetch -> score -> message -> send`. Each is `(event, context, deps=None) -> dict`.
+
+- **Hand-off**: each stage reads what the one before wrote to the object store under
+  `runs/<execution_id>/` (`fetch.json`, `score.json`, `message.json`), writes its own file,
+  and returns only keys and small flags (`nothing_to_send`, `sent`, counts); a Step
+  Functions payload is capped at 256 KB. `execution_id` comes in the event (Step Functions
+  gives `$$.Execution.Name`); ids with `/`, `\`, `.`, `..`, non-printable characters (control, DEL) or more than 80 characters are refused, and
+  a key in the event must be the one derived from the id. The same id twice overwrites.
+- **Files** are `{"schema", "version": 1, "data"}` written by `serialize.py`, which walks the
+  dataclasses' type hints and is strict: unknown or missing keys, wrong types, naive
+  datetimes, NaN and unknown versions raise `SerializationError` (errors name the path,
+  never the value). Datetimes come back with a fixed UTC offset, not the IANA zone: compare
+  through UTC (the scorer and message code do). `message.json` holds the new facts and the
+  text (None = nothing to send), and the text is stored in the (private) bucket.
+- **Behaviour** matches the CLI: `fetch` records per-spot errors and raises
+  `AllSpotsFailedError` only when every spot failed (after writing the file); `message` skips
+  entries already in the sent record and makes no Claude call when nothing is new, returning
+  `nothing_to_send: true`, after which `send` does nothing at all (no topic, credentials,
+  store or message file is read).
+- **Send** calls `send_notification` once (its own narrow retry, nothing more: the state
+  machine must not retry it) and records `Message.covered` only after SNS accepts. Record
+  failure after an accepted publish logs `sent_record_failed` and returns
+  `recorded: false`; it does not raise (a retry could email twice). Setup problems raise
+  `ConfigError`; a failed send raises `SendFailedError(reason, attempts)`; a read timeout
+  raises `SendOutcomeUnknownError`. The class names are what the state machine matches on,
+  so they are stable (tests pin them).
+- **Dependencies** are injected through `Dependencies` (store, storage, fetchers, writer,
+  sender, sent_store, clock); anything left out is built lazily from the environment:
+  `GOODDAYS_RUN_BUCKET`, `GOODDAYS_NWS_USER_AGENT` (every stage reads the settings, send's
+  record step included), `GOODDAYS_SPOTS_PATH` (default `spots.yaml`, shipped with the
+  code), `GOODDAYS_SENT_PATH` (default `data/sent.json`), `GOODDAYS_SNS_TOPIC_ARN`,
+  `ANTHROPIC_API_KEY`. `writer=None` means use Claude; there are no `--no-ai`, `--dry-run` or
+  `--resend` equivalents.
+- **Writable check**: `message` (before it calls Claude) and `send` (before it publishes) call
+  `SentStore.check_writable()`; an unusable record is a `ConfigError` naming the file and
+  `GOODDAYS_SENT_PATH`, with "nothing was sent". A `nothing_to_send` run checks nothing.
+- **Until phase 2** the default sent record is the relative file `data/sent.json`, which is
+  read-only on Lambda (`/var/task`): set `GOODDAYS_SENT_PATH=/tmp/sent.json` or every send ends
+  with `recorded: false`. Even then `/tmp` does not persist between invocations, and the
+  handlers read the record without holding its lock (only `record` is locked), so
+  overlapping runs are unprotected: do not schedule it live before the DynamoDB store exists.
+- **Tests** can never touch S3: an autouse guard makes `s3_store._new_client` raise, and the
+  S3 store is tested with a stubbed client. The CLI is untouched except that the AWS setup
+  problem text now lives in `notify.AWS_SETUP_PROBLEMS`.
 
 ## Rules
 - **No scoring or judgment in the fetch stage.** This stage only fetches and normalizes.

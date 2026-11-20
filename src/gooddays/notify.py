@@ -38,6 +38,20 @@ _TOPIC_ARN = re.compile(
 NotificationSender = Callable[[str, str, str], str]
 
 
+# Reasons the AWS side reports for a problem with the user's own setup (found before
+# any request is made), and what to tell them.
+AWS_SETUP_PROBLEMS = {
+    "no_credentials": (
+        "no AWS credentials found (set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, "
+        "or AWS_PROFILE to a profile that exists)"
+    ),
+    "bad_aws_config": (
+        "your AWS settings are not usable (check that AWS_PROFILE names a profile "
+        "that exists, and your AWS config files)"
+    ),
+}
+
+
 class SendError(Exception):
     """A send failed. `reason` is a short key that is safe to log and print.
 

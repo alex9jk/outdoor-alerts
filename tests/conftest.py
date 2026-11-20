@@ -6,7 +6,7 @@ from typing import Any
 import boto3
 import pytest
 
-from gooddays import cli, notify, sns_sender
+from gooddays import cli, notify, s3_store, sns_sender
 from gooddays.fetch import http
 
 # The real client factory, kept so adapter tests can opt back in.
@@ -58,12 +58,20 @@ def no_real_send(
         raise AssertionError("a test tried to make a real AWS client: fake the sender")
 
     monkeypatch.setattr(sns_sender, "_new_client", forbidden)
+
+    def forbidden_s3() -> Any:
+        raise AssertionError("a test tried to make a real S3 client: use a fake store")
+
+    monkeypatch.setattr(s3_store, "_new_client", forbidden_s3)
     # boto3 keeps one default session that caches the credentials it first finds, so
     # a test that set dummy credentials would leak them into every later client.
     monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)
     for name in (
         "CI",
         "GOODDAYS_SNS_TOPIC_ARN",
+        "GOODDAYS_RUN_BUCKET",
+        "GOODDAYS_SPOTS_PATH",
+        "GOODDAYS_SENT_PATH",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
